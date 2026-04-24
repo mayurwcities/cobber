@@ -166,6 +166,58 @@ function prettify(err) {
       title: 'Unexpected response',
       message: 'The server returned something unreadable.',
     },
+    payment_not_ready: {
+      title: 'Payment form is still loading',
+      message: rawMsg || 'Give it a second and try again.',
+    },
+    payment_invalid: {
+      title: 'Please check your card details',
+      message: rawMsg || 'One of the card fields looks wrong. Review the highlighted fields and try again.',
+    },
+    authorization_failed: {
+      title: 'Card authorization declined',
+      message: rawMsg || 'Your bank declined the authorization. Try another card or contact your issuer.',
+    },
+    duplicate_transaction: {
+      title: 'Duplicate transaction blocked',
+      message: 'Braintree blocks identical amount + card combinations within ~30 seconds.',
+      hint: 'Wait 30 seconds and try again, or disable Duplicate Transaction Checking in the Braintree control panel (Settings → Processing).',
+    },
+    capture_failed: {
+      title: 'Booking confirmed — payment needs follow-up',
+      message: rawMsg || 'Your booking went through, but we could not charge your card after several attempts.',
+      hint: 'Your ticket is valid. Please contact support with the transaction reference shown above so they can complete the charge.',
+    },
+    no_amount: {
+      title: 'Could not determine the amount to charge',
+      message: rawMsg || 'We couldn\'t read a price from the quote. Please go back a step and retry.',
+    },
+    invalid_amount: {
+      title: 'Invalid amount',
+      message: rawMsg || 'The amount to charge is not valid.',
+    },
+    missing_nonce: {
+      title: 'Missing payment token',
+      message: rawMsg || 'The card form didn\'t produce a payment token. Please re-enter your card.',
+    },
+    braintree_error: {
+      title: 'Payment provider error',
+      message: rawMsg || 'The payment provider returned an error. Please try again.',
+    },
+    booking_incomplete: {
+      title: 'Please complete the booking details',
+      message: rawMsg || 'Fill in all required fields before continuing to payment.',
+    },
+    booking_not_confirmed: {
+      title: "Booking didn't go through",
+      message: rawMsg || 'The booking could not be confirmed. Any card hold has been released.',
+      hint: 'Please re-enter your card details before retrying.',
+    },
+    step_failed: {
+      title: 'Please review your entries',
+      message: rawMsg || 'Fix the highlighted step and try again.',
+      hint: 'Your card has not been charged — any hold has been released. Please re-enter your card details before retrying.',
+    },
   };
 
   const preset = CATALOG[code];

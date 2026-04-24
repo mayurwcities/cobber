@@ -1,9 +1,10 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Loading, ErrorBox } from '@/components/States';
 import DatePicker from '@/components/DatePicker';
 import { apiGet, apiPost, formatDuration, formatAgeRange, formatLocation } from '@/lib/api';
+import { scrollToElement } from '@/lib/scroll';
 import { useMoney } from '@/components/MoneyProvider';
 
 export default function ProductDetailPage() {
@@ -20,6 +21,15 @@ export default function ProductDetailPage() {
   const [selectedDate, setSelectedDate] = useState('');
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState(null);
+  const startErrorRef = useRef(null);
+
+  // Scroll the error box into view whenever a new startError appears, so the
+  // user doesn't miss validation feedback after clicking Start booking on a
+  // long product page.
+  useEffect(() => {
+    if (!startError) return;
+    scrollToElement(startErrorRef.current, 80);
+  }, [startError]);
 
   useEffect(() => {
     (async () => {
@@ -316,7 +326,9 @@ export default function ProductDetailPage() {
             {starting ? 'Starting…' : 'Start booking'}
           </button>
 
-          {startError ? <div className="mt-3"><ErrorBox error={startError} /></div> : null}
+          <div ref={startErrorRef} className="scroll-mt-24">
+            {startError ? <div className="mt-3"><ErrorBox error={startError} /></div> : null}
+          </div>
 
           <p className="text-xs text-slate-500 mt-3">
             Product ID: {product.id} · resSystem: {product.resSystem || product.supplier?.resSystem}

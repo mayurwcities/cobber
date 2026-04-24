@@ -1,29 +1,48 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { apiGet, apiPut, apiPost, pickTotal } from '@/lib/api';
+import { scrollToElement } from '@/lib/scroll';
 import { useMoney } from '@/components/MoneyProvider';
 import { Loading, ErrorBox } from '@/components/States';
 import FlowStepper from '@/components/FlowStepper';
 import FareSelector from '@/components/FareSelector';
 import QuestionRenderer from '@/components/QuestionRenderer';
 import QuoteView from '@/components/QuoteView';
+import BraintreeDropIn from '@/components/BraintreeDropIn';
 
 export default function CheckoutPage() {
   const { flowId } = useParams();
   const router = useRouter();
-  const { formatUsd } = useMoney();
+  const { formatUsd, toUsd } = useMoney();
 
   const [flow, setFlow] = useState(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const [payStatus, setPayStatus] = useState(null); // "authorizing" | "booking" | "capturing" | null
+  const [canPay, setCanPay] = useState(false); // true once Drop-in reports a valid card
+  const [cooldownUntil, setCooldownUntil] = useState(0); // epoch ms; blocks Confirm during Braintree's 30s duplicate window
 
   // Per-step user input held locally.
   const [fareSel, setFareSel] = useState({});
   const [addOnSel, setAddOnSel] = useState({});
   const [answers, setAnswers] = useState({}); // { [questionUuid]: value }
+
+  // Braintree Drop-in imperative handle (requestPaymentMethod / isReady).
+  const dropinRef = useRef(null);
+  // Attached to the error-box wrapper inside StepView so setError in
+  // submit() can scroll the banner into view from this scope.
+  const errorRef = useRef(null);
+
+  // Single place that both stores the error AND brings the error banner
+  // into view. Keeps the scroll coupled to the error so every setError
+  // call in the submit flow produces visible feedback.
+  function reportError(err) {
+    setError(err);
+    setTimeout(() => scrollToElement(errorRef.current, 80), 0);
+  }
 
   useEffect(() => {
     (async () => {
@@ -81,13 +100,17 @@ export default function CheckoutPage() {
   }, [activeStep?.id]); // eslint-disable-line
 
   if (loading) return <Loading />;
-  if (error) return <ErrorBox error={error} />;
+  // Only blow the whole page away when the flow never loaded. Once we
+  // have flow data, submit/validation errors must render *inline* in
+  // StepView so the user can fix the form without losing their place.
+  if (error && !flow) return <ErrorBox error={error} />;
   if (!flow) return null;
 
   async function submit({ back = false } = {}) {
     if (!activeStep) return;
     setSubmitting(true);
     setError(null);
+    setPayStatus(null);
 
     // Patch the active step in a copy of the flow.
     const step = { ...activeStep };
@@ -116,10 +139,206 @@ export default function CheckoutPage() {
       steps: flow.steps.map((s) => (s.id === step.id ? step : s)),
     };
 
-    const res = await apiPut('/flows', nextFlow, { back });
-    setSubmitting(false);
+    // Payment: on the confirm-booking step (and only going forward), collect
+    // card details via Drop-in, AUTHORIZE the amount (hold), book, then
+    // CAPTURE on success / VOID on failure.
+    const needsPayment = !back && step.nextStepConfirmedBooking === true;
+    let transactionId = null;
 
-    if (!res.ok) { setError(res.error); return; }
+    if (needsPayment) {
+      // ------------------------------------------------------------
+      // 1) Client-side validation BEFORE we ever touch the card.
+      //    Authorize-then-void still leaves a visible auth in the
+      //    Braintree dashboard and may briefly tie up the customer's
+      //    available balance, so we only charge if the booking side
+      //    is fully ready.
+      // ------------------------------------------------------------
+      const validationIssue = validateStep(step, fareSel, answers);
+      if (validationIssue) {
+        setSubmitting(false);
+        setError({ code: 'booking_incomplete', message: validationIssue.message });
+        // Scroll/focus the missing field so the user lands directly on
+        // what needs fixing instead of being jumped to the top of the card.
+        if (validationIssue.questionUuid && typeof document !== 'undefined') {
+          const el = document.getElementById('q_' + validationIssue.questionUuid);
+          if (el) {
+            scrollToElement(el, 120);
+            setTimeout(() => { try { el.focus({ preventScroll: true }); } catch {} }, 350);
+          }
+        }
+        return;
+      }
+
+      // The confirm-booking step is sometimes FINAL_QUOTE (simple products)
+      // and sometimes TEMPORARY_HOLD (complex products) — the latter has no
+      // finalQuote on itself, so scan the whole flow for the latest quote.
+      const quote = step.finalQuote || findQuoteInFlow(flow);
+      const charge = resolveChargeAmount(quote, toUsd);
+      if (!charge) {
+        // eslint-disable-next-line no-console
+        console.warn('[braintree] could not resolve amount. step.finalQuote=', step.finalQuote, ' flow-level quote=', quote);
+        setSubmitting(false);
+        reportError({
+          code: 'no_amount',
+          message: 'Could not determine an amount to charge. See console for the quote shape.',
+        });
+        return;
+      }
+      const usdAmount = charge.amount;
+      const chargeCurrency = charge.currency;
+
+      if (!dropinRef.current?.isReady()) {
+        setSubmitting(false);
+        reportError({ code: 'payment_not_ready', message: 'Payment form is not ready yet. Please wait a moment and try again.' });
+        return;
+      }
+
+      let nonce = null;
+      try {
+        const pm = await dropinRef.current.requestPaymentMethod();
+        nonce = pm?.nonce;
+      } catch (e) {
+        setSubmitting(false);
+        reportError({ code: 'payment_invalid', message: e?.message || 'Please check your card details.' });
+        return;
+      }
+      if (!nonce) {
+        setSubmitting(false);
+        reportError({ code: 'payment_invalid', message: 'Could not get a payment token from the card form.' });
+        return;
+      }
+
+      setPayStatus('authorizing');
+      const authRes = await fetch('/api/braintree/authorize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nonce, amount: usdAmount, currency: chargeCurrency, flowId }),
+      });
+      const authJson = await authRes.json().catch(() => null);
+      if (!authJson?.success) {
+        setSubmitting(false);
+        setPayStatus(null);
+        // Nonce was consumed by this authorize attempt — clear so the
+        // next click tokenizes fresh.
+        try { await dropinRef.current?.clearSelectedPaymentMethod?.(); } catch {}
+        // Braintree's 30-second duplicate window — block the button
+        // until it passes so the user physically can't re-hit the rule.
+        if (authJson?.error?.code === 'duplicate_transaction') {
+          setCooldownUntil(Date.now() + 30_000);
+        }
+        reportError(authJson?.error || { code: 'authorization_failed', message: 'Card authorization failed.' });
+        return;
+      }
+      transactionId = authJson.data.transactionId;
+    }
+
+    setPayStatus(needsPayment ? 'booking' : null);
+    const res = await apiPut('/flows', nextFlow, { back });
+
+    // ------------------------------------------------------------------
+    // Intermediate step advance (not the confirm-booking submit). No
+    // Braintree was involved. Surface transport errors or the step's
+    // own FAILED state, but don't run the confirmed-booking check —
+    // the flow is legitimately mid-way and won't be confirmed yet.
+    // ------------------------------------------------------------------
+    if (!needsPayment) {
+      setSubmitting(false);
+      setPayStatus(null);
+      if (!res.ok) {
+        reportError(res.error);
+        return;
+      }
+      const failed = findFailedStep(res.data);
+      if (failed?.error) {
+        reportError({
+          code: 'step_failed',
+          message: failed.error.customerErrorMessage || failed.error.internalErrorMessage,
+          details: failed.error,
+        });
+      }
+      if (typeof window !== 'undefined') {
+        sessionStorage.setItem('livn.flow.' + flowId, JSON.stringify(res.data));
+      }
+      setFlow(res.data);
+      return;
+    }
+
+    // ------------------------------------------------------------------
+    // Confirm-booking submit. Money was authorized; we only capture if
+    // the booking truly landed, otherwise we void the hold. Livn can
+    // return envelope.success=true even when the flow ends in a FAILED
+    // step, so we inspect the flow itself via isBookingConfirmed().
+    // ------------------------------------------------------------------
+    const bookingConfirmed = res.ok && isBookingConfirmed(res.data);
+    const failedStep = res.ok ? findFailedStep(res.data) : null;
+
+    if (!bookingConfirmed) {
+      if (transactionId) {
+        try {
+          await fetch('/api/braintree/void', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ transactionId }),
+          });
+        } catch {}
+        // The nonce we just sent to /authorize is now spent — Braintree
+        // rejects the same nonce a second time with "Cannot use a
+        // payment_method_nonce more than once". Drop card selection so
+        // the user's next retry tokenizes fresh.
+        try { await dropinRef.current?.clearSelectedPaymentMethod?.(); } catch {}
+      }
+      setSubmitting(false);
+      setPayStatus(null);
+
+      const err = failedStep?.error
+        ? { code: 'step_failed', message: failedStep.error.customerErrorMessage || failedStep.error.internalErrorMessage, details: failedStep.error }
+        : res.error
+        ? res.error
+        : { code: 'booking_not_confirmed', message: 'Booking did not complete. Any card hold has been released.' };
+      reportError(err);
+
+      if (res.ok && res.data) {
+        if (typeof window !== 'undefined') {
+          sessionStorage.setItem('livn.flow.' + flowId, JSON.stringify(res.data));
+        }
+        setFlow(res.data);
+      }
+      return;
+    }
+
+    // Booking is confirmed — now capture the hold so the money actually moves.
+    // The /capture route already retries up to 3× with backoff, so a failure
+    // here means a sustained Braintree problem (or the hold was voided
+    // externally). We DO NOT auto-cancel the booking — the customer earned
+    // their ticket — but we surface the txn id + booking id so ops can
+    // settle manually in the Braintree dashboard within the hold window
+    // (~7 days for credit, ~30 for debit). After that the hold expires and
+    // the merchant has to chase the customer for payment.
+    if (transactionId) {
+      setPayStatus('capturing');
+      const capRes = await fetch('/api/braintree/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactionId }),
+      });
+      const capJson = await capRes.json().catch(() => null);
+      if (!capJson?.success) {
+        const bookingIds = (res.data?.bookings || []).map((b) => b.id).join(', ');
+        reportError({
+          code: 'capture_failed',
+          message: `Your booking is confirmed${bookingIds ? ` (${bookingIds})` : ''}, but we couldn't charge your card after several attempts. Please contact support and quote transaction ${transactionId}.`,
+          details: { transactionId, bookingIds, capture: capJson?.error },
+        });
+        // Operator-side log so this surfaces in server logs and any error
+        // collector you've wired up — capture failures are money-losing
+        // events and should always be auditable.
+        // eslint-disable-next-line no-console
+        console.error('[braintree] capture failed after retries', { transactionId, bookingIds, capJson });
+      }
+    }
+
+    setSubmitting(false);
+    setPayStatus(null);
 
     if (typeof window !== 'undefined') {
       sessionStorage.setItem('livn.flow.' + flowId, JSON.stringify(res.data));
@@ -179,7 +398,13 @@ export default function CheckoutPage() {
           onBack={() => submit({ back: true })}
           onPreview={previewPrice}
           submitting={submitting}
+          payStatus={payStatus}
           error={error}
+          errorRef={errorRef}
+          dropinRef={dropinRef}
+          canPay={canPay}
+          onRequestableChange={setCanPay}
+          cooldownUntil={cooldownUntil}
         />
       ) : isDone ? (
         <ConfirmedView flow={flow} />
@@ -194,22 +419,41 @@ export default function CheckoutPage() {
   );
 }
 
-function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answers, setAnswers, onNext, onBack, onPreview, submitting, error }) {
+function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answers, setAnswers, onNext, onBack, onPreview, submitting, payStatus, error, errorRef, dropinRef, canPay, onRequestableChange, cooldownUntil }) {
+  const { formatUsd } = useMoney();
   const hasFares = !!step.fareDetails;
   const hasQuestions = !!step.questions?.questionGroups?.length;
   const hasQuote = !!step.finalQuote;
+  const needsPayment = step.nextStepConfirmedBooking === true;
+  // On TEMPORARY_HOLD steps the finalQuote lives on a previous (DONE) step,
+  // so reach back into the flow so the "Authorizing $X" label stays accurate.
+  const payableQuote = step.finalQuote || (needsPayment ? findQuoteInFlow(flow) : null);
+  const totalPrice = payableQuote ? pickTotal(payableQuote) : null;
+  const totalUsdDisplay = totalPrice ? formatUsd(totalPrice) : null;
 
-  // Compute an expiry countdown if the step has one
+  // Compute an expiry countdown (if the step has one) AND a Braintree
+  // duplicate-filter cooldown after a rejected auth. Same tick for both.
   const expiry = step.expires ? new Date(step.expires).getTime() : null;
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    if (!expiry) return;
+    const needsTick = !!expiry || (cooldownUntil || 0) > Date.now();
+    if (!needsTick) return;
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [expiry]);
+  }, [expiry, cooldownUntil]);
   const remainingMs = expiry ? Math.max(0, expiry - now) : null;
   const mins = remainingMs !== null ? Math.floor(remainingMs / 60000) : null;
   const secs = remainingMs !== null ? Math.floor((remainingMs % 60000) / 1000) : null;
+  const cooldownSecs = cooldownUntil && cooldownUntil > now ? Math.ceil((cooldownUntil - now) / 1000) : 0;
+
+  const submitLabel = (() => {
+    if (cooldownSecs > 0) return `Try again in ${cooldownSecs}s`;
+    if (!submitting) return step.nextStepConfirmedBooking ? 'Confirm booking & pay' : 'Continue';
+    if (payStatus === 'authorizing') return 'Authorizing card…';
+    if (payStatus === 'booking') return 'Booking…';
+    if (payStatus === 'capturing') return 'Capturing payment…';
+    return 'Submitting…';
+  })();
 
   return (
     <div className="space-y-4">
@@ -226,9 +470,13 @@ function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answ
           ) : null}
         </div>
 
-        {step.status === 'FAILED' && step.error ? (
-          <div className="mt-3"><ErrorBox error={{ code: 'step_failed', message: step.error.customerErrorMessage || step.error.internalErrorMessage, details: step.error }} /></div>
-        ) : null}
+        <div ref={errorRef} className="scroll-mt-24">
+          {error ? (
+            <div className="mt-3"><ErrorBox error={error} /></div>
+          ) : step.status === 'FAILED' && step.error ? (
+            <div className="mt-3"><ErrorBox error={{ code: 'step_failed', message: step.error.customerErrorMessage || step.error.internalErrorMessage, details: step.error }} /></div>
+          ) : null}
+        </div>
 
         {hasFares ? (
           <div className="mt-4">
@@ -276,9 +524,17 @@ function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answ
             No additional input needed — just continue.
           </p>
         ) : null}
-      </section>
 
-      {error ? <ErrorBox error={error} /> : null}
+        {needsPayment ? (
+          <div className="mt-6 pt-6 border-t border-slate-200">
+            <BraintreeDropIn
+              ref={dropinRef}
+              amount={totalUsdDisplay}
+              onRequestableChange={onRequestableChange}
+            />
+          </div>
+        ) : null}
+      </section>
 
       <div className="flex justify-between gap-3">
         <div>
@@ -294,13 +550,163 @@ function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answ
               Preview price
             </button>
           ) : null}
-          <button className="btn-primary" disabled={submitting} onClick={onNext}>
-            {submitting ? 'Submitting…' : (step.nextStepConfirmedBooking ? 'Confirm booking' : 'Continue')}
+          <button
+            className="btn-primary"
+            disabled={submitting || (needsPayment && !canPay) || cooldownSecs > 0}
+            onClick={onNext}
+            title={
+              cooldownSecs > 0
+                ? `Braintree duplicate-transaction window — available in ${cooldownSecs}s`
+                : needsPayment && !canPay
+                ? 'Please fill in your card details first'
+                : undefined
+            }
+          >
+            {submitLabel}
           </button>
         </div>
       </div>
     </div>
   );
+}
+
+/**
+ * Return { message, questionUuid? } describing the first validation
+ * problem on the current step, or null if the step is ready to submit.
+ * Runs BEFORE we hit Braintree so an incomplete form never creates an
+ * authorization in the first place.
+ */
+function validateStep(step, fareSel, answers) {
+  if (step.fareDetails) {
+    const totalQty = Object.values(fareSel || {}).reduce((n, v) => n + Number(v || 0), 0);
+    if (totalQty < 1) return { message: 'Please choose at least one ticket before paying.' };
+  }
+  const groups = step.questions?.questionGroups || [];
+  for (const g of groups) {
+    for (const q of g.questions || []) {
+      if (!q.required) continue;
+      const v = answers?.[q.uuid];
+      const empty =
+        v === undefined || v === null || v === '' ||
+        (Array.isArray(v) && v.length === 0);
+      if (empty) {
+        const label = q.title || q.question || 'a required field';
+        return {
+          message: `Please fill in "${label}" before paying.`,
+          questionUuid: q.uuid,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The Livn envelope returns success:true even when the flow ends in a
+ * FAILED step, so we need to look at the flow itself to know whether
+ * the booking actually landed.
+ */
+function isBookingConfirmed(flow) {
+  if (!flow) return false;
+  const steps = flow.steps || [];
+  if (steps.some(s => s.status === 'FAILED')) return false;
+  const hasConfirmed = steps.some(s => s.milestone === 'CONFIRMED_BOOKING' && s.status === 'DONE');
+  return hasConfirmed || (Array.isArray(flow.bookings) && flow.bookings.length > 0);
+}
+
+function findFailedStep(flow) {
+  return flow?.steps?.find(s => s.status === 'FAILED') || null;
+}
+
+/**
+ * Walk the flow's steps to find the most recent finalQuote. Some products
+ * end in a TEMPORARY_HOLD step that carries no quote of its own — the
+ * finalQuote lives on the previous (now DONE) FINAL_QUOTE step.
+ *
+ * Livn returns steps newest-first, so we iterate in array order and take
+ * the first one with a quote. Falls back to a scan that respects
+ * sequenceNumber in case that ordering contract ever changes.
+ */
+function findQuoteInFlow(flow) {
+  const steps = flow?.steps;
+  if (!Array.isArray(steps)) return null;
+  for (const s of steps) if (s?.finalQuote) return s.finalQuote;
+  const sorted = [...steps].sort((a, b) => (b?.sequenceNumber || 0) - (a?.sequenceNumber || 0));
+  for (const s of sorted) if (s?.finalQuote) return s.finalQuote;
+  return null;
+}
+
+/**
+ * Resolve an amount to charge from a Livn quote, handling the 4 different
+ * product-pricing shapes we see in practice. Returns { amount, currency }
+ * where amount is a "12.34" string suitable for Braintree transaction.sale,
+ * or null if no sensible amount can be derived.
+ *
+ * Lookup order:
+ *   1. grossTotal / total / netTotal at the quote root.
+ *   2. Sum of lineItems[].grossTotal (or grossPerUnit × quantity).
+ *   3. First numeric price-like field we can find at the root.
+ *
+ * Each candidate is run through toUsd(); if that succeeds we charge USD
+ * (matches the site's USD-everywhere display). If FX rates aren't loaded
+ * or the currency isn't in the rates table, we fall back to the raw
+ * amount in its native currency so the auth isn't blocked on FX.
+ */
+function resolveChargeAmount(quote, toUsd) {
+  if (!quote || typeof quote !== 'object') return null;
+
+  const candidates = [];
+
+  const rootTotal = quote.grossTotal || quote.total || quote.netTotal;
+  if (rootTotal) candidates.push(rootTotal);
+
+  const items = Array.isArray(quote.lineItems) ? quote.lineItems
+              : Array.isArray(quote.items) ? quote.items : [];
+  if (items.length) {
+    let sum = 0;
+    let currency = null;
+    let ok = true;
+    for (const li of items) {
+      const lineTotal = li.grossTotal || li.totalPrice || li.price;
+      if (lineTotal && Number.isFinite(Number(lineTotal.amount))) {
+        sum += Number(lineTotal.amount);
+        currency = currency || lineTotal.currency;
+        continue;
+      }
+      const unit = li.grossPerUnit || li.netPerUnit || li.unitPrice;
+      const qty = Number(li.quantity ?? 1);
+      if (unit && Number.isFinite(Number(unit.amount)) && Number.isFinite(qty)) {
+        sum += Number(unit.amount) * qty;
+        currency = currency || unit.currency;
+        continue;
+      }
+      ok = false;
+      break;
+    }
+    if (ok && sum > 0) candidates.push({ amount: sum, currency: currency || 'USD' });
+  }
+
+  for (const key of ['finalPrice', 'price', 'amount', 'totalAmount']) {
+    const v = quote[key];
+    if (v && typeof v === 'object' && Number.isFinite(Number(v.amount))) {
+      candidates.push(v);
+    } else if (Number.isFinite(Number(v))) {
+      candidates.push({ amount: Number(v), currency: quote.currency || 'USD' });
+    }
+  }
+
+  for (const c of candidates) {
+    const amt = Number(c.amount);
+    if (!Number.isFinite(amt) || amt <= 0) continue;
+
+    const usd = toUsd(c);
+    if (Number.isFinite(usd) && usd > 0) {
+      return { amount: usd.toFixed(2), currency: 'USD' };
+    }
+    return { amount: amt.toFixed(2), currency: c.currency || 'USD' };
+  }
+
+  return null;
 }
 
 function serializeAnswerValue(v) {

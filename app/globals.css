@@ -87,6 +87,49 @@ html, body {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Braintree Drop-in theme overrides. Drop-in injects its own CSS at  */
+/* runtime; these rules match/exceed that selector specificity so     */
+/* the card form borders mirror the site's .input component.          */
+/* ------------------------------------------------------------------ */
+.braintree-dropin .braintree-sheet__content--form .braintree-form__field-group .braintree-form__field .braintree-form__hosted-field,
+.braintree-dropin .braintree-sheet__content--form .braintree-form__field-group .braintree-form__field .braintree-form__hosted-field:hover,
+.braintree-dropin .braintree-sheet__content--form .braintree-form__field-group .braintree-form__field .braintree-form__hosted-field.braintree-form__field--valid,
+.braintree-dropin .braintree-sheet__content--form .braintree-form__field-group.braintree-form__field-group--is-focused .braintree-form__field .braintree-form__hosted-field,
+.braintree-dropin .braintree-sheet__content--form .braintree-form__field-group.braintree-form__field-group--has-error .braintree-form__field .braintree-form__hosted-field,
+.braintree-dropin .braintree-sheet__content--form .braintree-form__field-group.braintree-form__field-group--has-error .braintree-form__field .braintree-form__hosted-field:hover {
+  border: 1px solid #e2e8f0; /* slate-200, matches .input ring */
+  border-radius: 0.5rem;
+  background-color: #ffffff;
+  height: 40px;
+  box-shadow: none;
+  outline: none;
+  transition: none;
+}
+.braintree-dropin .braintree-form__field-group .braintree-form__label {
+  color: #54618a; /* ink-500, matches .label */
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+/* The "By paying with my card, I agree…" notice renders as a flex    */
+/* child of the Expiration/CVV row — force it onto its own line.      */
+.braintree-dropin .braintree-form__flexible-fields .braintree-form__notice-of-collection {
+  flex-basis: 100%;
+  width: 100%;
+  margin: 6px 0 0;
+  padding-left: 5px;
+  text-align: left;
+  font-size: 11px;
+  color: #54618a;
+}
+.braintree-dropin .braintree-form__flexible-fields .braintree-form__notice-of-collection a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 @layer utilities {
   .text-balance { text-wrap: balance; }
   .grid-auto-fill-cards {
