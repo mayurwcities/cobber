@@ -183,6 +183,31 @@ function prettify(err) {
       message: 'Braintree blocks identical amount + card combinations within ~30 seconds.',
       hint: 'Wait 30 seconds and try again, or disable Duplicate Transaction Checking in the Braintree control panel (Settings → Processing).',
     },
+    cvv_mismatch: {
+      title: 'CVV did not match',
+      message: rawMsg || 'The 3 or 4-digit security code on the back of the card was rejected by the issuing bank.',
+      hint: 'Double-check the CVV and try again, or use a different card.',
+    },
+    avs_mismatch: {
+      title: 'Billing address did not match',
+      message: rawMsg || 'The address on file with the issuing bank did not match what we sent.',
+      hint: 'Verify the billing address with your card issuer, or try a different card.',
+    },
+    fraud_suspected: {
+      title: 'Card blocked by fraud check',
+      message: rawMsg || 'This transaction was blocked by our fraud-prevention rules.',
+      hint: 'Please use a different payment method. If you believe this is in error, contact support.',
+    },
+    card_verification_required: {
+      title: 'Card needs verification',
+      message: rawMsg || 'The issuing bank requires additional verification (e.g. 3-D Secure).',
+      hint: 'Try again, or use a different card that does not require verification.',
+    },
+    insufficient_funds: {
+      title: 'Insufficient funds',
+      message: rawMsg || 'The card does not have enough available funds for this charge.',
+      hint: 'Try a different card or add funds to the card.',
+    },
     capture_failed: {
       title: 'Booking confirmed — payment needs follow-up',
       message: rawMsg || 'Your booking went through, but we could not charge your card after several attempts.',
