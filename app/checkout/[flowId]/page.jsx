@@ -106,6 +106,20 @@ export default function CheckoutPage() {
   if (error && !flow) return <ErrorBox error={error} />;
   if (!flow) return null;
 
+  // Fire-and-forget POST to /api/booking-record. Server appends to the
+  // date-rotated log file AND emails the operations team. We never await
+  // this from the UI critical path — payment / booking outcome should not
+  // be held up if SMTP is slow, and any failure is logged server-side.
+  function recordBookingEvent(payload) {
+    try {
+      fetch('/api/booking-record', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(() => {});
+    } catch {}
+  }
+
   async function submit({ back = false } = {}) {
     if (!activeStep) return;
     setSubmitting(true);
@@ -144,6 +158,10 @@ export default function CheckoutPage() {
     // CAPTURE on success / VOID on failure.
     const needsPayment = !back && step.nextStepConfirmedBooking === true;
     let transactionId = null;
+    // Hoisted so the booking-record calls after this block can reference
+    // them when reporting the captured / voided / failed event.
+    let chargeAmount = null;
+    let chargeCurrency = null;
 
     if (needsPayment) {
       // ------------------------------------------------------------
@@ -184,8 +202,9 @@ export default function CheckoutPage() {
         });
         return;
       }
-      const usdAmount = charge.amount;
-      const chargeCurrency = charge.currency;
+      chargeAmount = charge.amount;
+      chargeCurrency = charge.currency;
+      const usdAmount = chargeAmount;
 
       if (!dropinRef.current?.isReady()) {
         setSubmitting(false);
@@ -226,6 +245,18 @@ export default function CheckoutPage() {
         if (authJson?.error?.code === 'duplicate_transaction') {
           setCooldownUntil(Date.now() + 30_000);
         }
+        recordBookingEvent({
+          status: 'auth_failed',
+          flowId,
+          productId: flow.productId,
+          productName: flow.product?.name,
+          date: flow.date,
+          amount: chargeAmount,
+          currency: chargeCurrency,
+          transactionId: authJson?.data?.transactionId || authJson?.error?.details?.transactionId || null,
+          errorMessage: authJson?.error?.message || 'Authorization failed',
+          errorCode: authJson?.error?.code,
+        });
         reportError(authJson?.error || { code: 'authorization_failed', message: 'Card authorization failed.' });
         return;
       }
@@ -297,6 +328,22 @@ export default function CheckoutPage() {
         : { code: 'booking_not_confirmed', message: 'Booking did not complete. Any card hold has been released.' };
       reportError(err);
 
+      if (transactionId) {
+        recordBookingEvent({
+          status: 'auth_voided',
+          flowId,
+          productId: flow.productId,
+          productName: flow.product?.name,
+          date: flow.date,
+          livnReference: res.data?.livnReference || flow.livnReference,
+          amount: chargeAmount,
+          currency: chargeCurrency,
+          transactionId,
+          errorMessage: err.message,
+          errorCode: err.code,
+        });
+      }
+
       if (res.ok && res.data) {
         if (typeof window !== 'undefined') {
           sessionStorage.setItem('livn.flow.' + flowId, JSON.stringify(res.data));
@@ -322,18 +369,54 @@ export default function CheckoutPage() {
         body: JSON.stringify({ transactionId }),
       });
       const capJson = await capRes.json().catch(() => null);
+
+      const bookings = res.data?.bookings || [];
+      const bookingIds = bookings.map((b) => b.id);
+      const firstBooking = bookings[0];
+      const customer = firstBooking
+        ? [firstBooking.partyName, firstBooking.partyEmailAddress].filter(Boolean).join(' · ')
+        : null;
+
       if (!capJson?.success) {
-        const bookingIds = (res.data?.bookings || []).map((b) => b.id).join(', ');
         reportError({
           code: 'capture_failed',
-          message: `Your booking is confirmed${bookingIds ? ` (${bookingIds})` : ''}, but we couldn't charge your card after several attempts. Please contact support and quote transaction ${transactionId}.`,
+          message: `Your booking is confirmed${bookingIds.length ? ` (${bookingIds.join(', ')})` : ''}, but we couldn't charge your card after several attempts. Please contact support and quote transaction ${transactionId}.`,
           details: { transactionId, bookingIds, capture: capJson?.error },
         });
-        // Operator-side log so this surfaces in server logs and any error
-        // collector you've wired up — capture failures are money-losing
-        // events and should always be auditable.
         // eslint-disable-next-line no-console
         console.error('[braintree] capture failed after retries', { transactionId, bookingIds, capJson });
+
+        recordBookingEvent({
+          status: 'capture_failed',
+          flowId,
+          productId: flow.productId,
+          productName: flow.product?.name,
+          date: flow.date,
+          livnReference: res.data?.livnReference,
+          bookingIds,
+          customer,
+          amount: chargeAmount,
+          currency: chargeCurrency,
+          transactionId,
+          transactionStatus: capJson?.data?.status || 'authorized',
+          errorMessage: capJson?.error?.message || 'Capture failed after retries',
+          errorCode: capJson?.error?.code,
+        });
+      } else {
+        recordBookingEvent({
+          status: 'captured',
+          flowId,
+          productId: flow.productId,
+          productName: flow.product?.name,
+          date: flow.date,
+          livnReference: res.data?.livnReference,
+          bookingIds,
+          customer,
+          amount: chargeAmount,
+          currency: chargeCurrency,
+          transactionId,
+          transactionStatus: capJson?.data?.status || 'submitted_for_settlement',
+        });
       }
     }
 
