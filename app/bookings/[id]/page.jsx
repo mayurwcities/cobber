@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { apiGet, apiDelete, formatDate, formatDateTime } from '@/lib/api';
@@ -29,6 +29,8 @@ export default function BookingDetailPage() {
   const [error, setError] = useState(null);
   const [cancelling, setCancelling] = useState(false);
   const [reason, setReason] = useState('');
+  const [reasonError, setReasonError] = useState(false);
+  const reasonRef = useRef(null);
 
   async function load() {
     setLoading(true);
@@ -42,9 +44,24 @@ export default function BookingDetailPage() {
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
 
   async function cancel() {
+    const trimmed = reason.trim();
+    if (!trimmed) {
+      // Livn rejects DELETE /bookings/:id with a bare HTTP 400 when reason
+      // is empty — that surfaces as a generic "rejected" message for the
+      // user. Catch it here, mark the field as errored, scroll/focus it so
+      // the user immediately sees what to fix.
+      setReasonError(true);
+      setError(null);
+      const el = reasonRef.current;
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setTimeout(() => { try { el.focus({ preventScroll: true }); } catch (_) {} }, 250);
+      }
+      return;
+    }
     if (!confirm('Cancel this booking?')) return;
     setCancelling(true);
-    const res = await apiDelete(`/bookings/${id}`, { reason });
+    const res = await apiDelete(`/bookings/${id}`, { reason: trimmed });
     setCancelling(false);
     if (!res.ok) { setError(res.error); return; }
     load();
@@ -85,7 +102,14 @@ export default function BookingDetailPage() {
             {cancelled ? (
               <span className="badge bg-red-100 text-red-700 self-center">Cancelled</span>
             ) : (
-              <button className="btn-danger" onClick={cancel} disabled={cancelling || inProgress}>
+              // Intentionally NOT disabled when reason is empty — clicking
+              // a dead button looks broken. Let the user click; the handler
+              // surfaces the missing-reason hint inline.
+              <button
+                className="btn-danger"
+                onClick={cancel}
+                disabled={cancelling || inProgress}
+              >
                 {inProgress ? 'Cancellation in progress' : cancelling ? 'Cancelling…' : 'Cancel booking'}
               </button>
             )}
@@ -93,14 +117,33 @@ export default function BookingDetailPage() {
         </div>
 
         {!cancelled ? (
-          <div className="mt-3">
-            <label className="label">Cancellation reason (optional)</label>
+          <div className="mt-3 scroll-mt-24">
+            {/* Livn rejects DELETE /bookings/:id with HTTP 400 (and no error
+                detail) when the reason field is empty — supplier requires
+                it. We don't disable the Cancel button when this is empty;
+                instead the handler scrolls/focuses this field and switches
+                it into an inline-error state below. */}
+            <label className="label">
+              Cancellation reason <span className="text-red-500">*</span>
+            </label>
             <input
-              className="input"
+              ref={reasonRef}
+              className={'input ' + (reasonError ? 'ring-2 ring-red-400 focus:ring-red-500' : '')}
               value={reason}
-              onChange={(e) => setReason(e.target.value)}
+              onChange={(e) => { setReason(e.target.value); if (reasonError) setReasonError(false); }}
               placeholder="e.g. customer changed plans"
+              required
+              aria-invalid={reasonError}
             />
+            {reasonError ? (
+              <p className="text-xs text-red-600 mt-1 font-medium">
+                Please type a reason — the supplier won't accept the cancellation without one.
+              </p>
+            ) : (
+              <p className="text-xs text-slate-500 mt-1">
+                The supplier requires a reason before they can process the cancellation.
+              </p>
+            )}
           </div>
         ) : null}
       </div>
