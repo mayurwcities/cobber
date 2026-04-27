@@ -1,12 +1,16 @@
 'use client';
 import Link from 'next/link';
-import { truncate, formatDuration, getProductMarkup, applyMarkup } from '@/lib/api';
+import { truncate, formatDuration, getProductMarkup, applyMarkup, pickFromPrice } from '@/lib/api';
 import { useMoney } from '@/components/MoneyProvider';
 
 export default function ProductCard({ product }) {
-  const { formatUsd } = useMoney();
+  const { formatUsd, targetCurrency } = useMoney();
   const imageUrl = product?.images?.[0]?.url || product?.images?.[0] || null;
-  const rawFrom = Array.isArray(product?.fromPrices) ? product.fromPrices[0] : null;
+  // Prefer Livn's native price for the user's active display currency so the
+  // home-page "From" matches the per-fare price shown on the FARE_SELECTION
+  // step. Falls back to the first entry (typically AUD) for single-currency
+  // products, where formatUsd's FX conversion picks up.
+  const rawFrom = pickFromPrice(product?.fromPrices, targetCurrency);
   const from = applyMarkup(rawFrom, getProductMarkup(product));
   const categories = (product?.categories || []).map((c) => c?.name || c).filter(Boolean);
   const duration = formatDuration(product?.duration);

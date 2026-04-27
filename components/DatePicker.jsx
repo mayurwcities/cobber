@@ -1,7 +1,7 @@
 'use client';
 import { useMemo, useState } from 'react';
 import { useMoney } from '@/components/MoneyProvider';
-import { applyMarkup } from '@/lib/api';
+import { applyMarkup, pickFromPrice } from '@/lib/api';
 
 /**
  * Calendar date picker tuned for Livn's /departures endpoint.
@@ -28,20 +28,23 @@ export default function DatePicker({
   // the ticket / quote prices later in the flow.
   markup = 0,
 }) {
-  const { formatPriceCompact } = useMoney();
+  const { formatPriceCompact, targetCurrency } = useMoney();
   // ---- normalise departures into a Map<iso, fromPrice> ----
-  // All fromPrices for a given date represent the same trip in different
-  // currencies; since we always display USD, any of them works.
+  // Multi-currency products (Salzburg) ship one entry per supported currency;
+  // pick Livn's native price for the active display currency so the tile
+  // reads the same number the user will see on the FARE_SELECTION step
+  // (and not an FX-derived approximation off the AUD entry).
   const priceByDate = useMemo(() => {
     const m = new Map();
     for (const d of departures || []) {
       const iso = typeof d === 'string' ? d : d?.date;
       if (!iso) continue;
-      const rawFp = (typeof d === 'object' && Array.isArray(d.fromPrices)) ? d.fromPrices[0] : null;
+      const fps = (typeof d === 'object' && Array.isArray(d.fromPrices)) ? d.fromPrices : null;
+      const rawFp = pickFromPrice(fps, targetCurrency);
       m.set(iso, applyMarkup(rawFp, markup));
     }
     return m;
-  }, [departures, markup]);
+  }, [departures, markup, targetCurrency]);
 
   const today = useMemo(() => {
     const d = new Date();

@@ -3,14 +3,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Loading, ErrorBox } from '@/components/States';
 import DatePicker from '@/components/DatePicker';
-import { apiGet, apiPost, formatDuration, formatAgeRange, formatLocation, getProductMarkup, applyMarkup } from '@/lib/api';
+import { apiGet, apiPost, formatDuration, formatAgeRange, formatLocation, getProductMarkup, applyMarkup, pickFromPrice } from '@/lib/api';
 import { scrollToElement } from '@/lib/scroll';
 import { useMoney } from '@/components/MoneyProvider';
 
 export default function ProductDetailPage() {
   const { id } = useParams();
   const router = useRouter();
-  const { formatUsd, formatUsdText, preferredDisplayCurrency, setPreferredDisplayCurrency } = useMoney();
+  const { formatUsd, formatUsdText, preferredDisplayCurrency, setPreferredDisplayCurrency, targetCurrency } = useMoney();
 
   const [product, setProduct] = useState(null);
   const [error, setError] = useState(null);
@@ -129,7 +129,12 @@ export default function ProductDetailPage() {
   const netRate = product?._pricing?.usesNetRates ?? product?.usesNetRates;
   const productMarkup = getProductMarkup(product);
   const rawFromPrices = product?._pricing?.fromPrices || product?.fromPrices || [];
-  const fromPrices = rawFromPrices.map((p) => applyMarkup(p, productMarkup));
+  // Pick Livn's native price for the active display currency so the sticky
+  // "From" sidebar matches the per-fare price the user will see on the
+  // FARE_SELECTION step exactly. Falls back to the first entry for
+  // single-currency products, where formatUsd's FX path takes over.
+  const nativeFrom = pickFromPrice(rawFromPrices, targetCurrency);
+  const fromPrices = nativeFrom ? [applyMarkup(nativeFrom, productMarkup)] : [];
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
