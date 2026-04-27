@@ -8,7 +8,7 @@ import { useMoney } from '@/components/MoneyProvider';
 import { Loading, ErrorBox } from '@/components/States';
 import FlowStepper from '@/components/FlowStepper';
 import FareSelector from '@/components/FareSelector';
-import QuestionRenderer from '@/components/QuestionRenderer';
+import QuestionRenderer, { questionNumericBounds, walkActiveQuestions } from '@/components/QuestionRenderer';
 import QuoteView from '@/components/QuoteView';
 import BraintreeDropIn from '@/components/BraintreeDropIn';
 
@@ -82,6 +82,14 @@ export default function CheckoutPage() {
   // visible/charged number agrees.
   const markup = getProductMarkup(flow?.product);
 
+  // Display currency in checkout follows the user's catalog-wide header
+  // preference (preferredDisplayCurrency). The booking currency Livn settles
+  // in is recorded as flow.currency and submitted as part of the flow, but
+  // visually we keep prices in whatever the user chose to browse in — FX
+  // handles the conversion. The Braintree authorize amount is computed via
+  // toUsd() separately, so the actual card charge is always USD-equivalent
+  // regardless of what's shown.
+
   // Livn returns steps newest-first, so we can't look at steps[length - 1].
   // A flow is "done" when a CONFIRMED_BOOKING step exists AND is DONE,
   // or when there are already booking records attached to the flow.
@@ -141,9 +149,27 @@ export default function CheckoutPage() {
       step.addOnSelections = Object.entries(addOnSel).map(([uuid, quantity]) => ({ uuid, quantity }));
     }
     if (step.questions) {
+      // Only send answers for questions that are CURRENTLY reachable on this
+      // step. walkActiveQuestions follows option-gated follow-ups (e.g. the
+      // Frequent Flyer Number that lives inside the YES option). If the user
+      // picked YES, filled the regex, then flipped to NO, the stale follow-up
+      // answer still lives in the React answers map — without this filter we
+      // would send it to Livn and trip "Unknown questionUuid".
+      const activeUuids = new Set();
+      for (const g of step.questions.questionGroups || []) {
+        for (const top of g.questions || []) {
+          for (const aq of walkActiveQuestions(top, answers)) {
+            activeUuids.add(aq.uuid);
+          }
+        }
+      }
       step.answers = {
         answers: Object.entries(answers)
-          .filter(([, v]) => v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && v.length === 0))
+          .filter(([uuid, v]) =>
+            activeUuids.has(uuid) &&
+            v !== undefined && v !== null && v !== '' &&
+            !(Array.isArray(v) && v.length === 0)
+          )
           .map(([questionUuid, value]) => ({
             questionUuid,
             // Livn's Answer.value is a plain String. Coerce arrays (from
@@ -549,119 +575,248 @@ function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answ
     return 'Submitting…';
   })();
 
+  // Pretty milestone label so the section header reads "Choose your tickets"
+  // instead of "FARE_SELECTION". Fall back to whatever Livn supplied if we
+  // don't have a friendly mapping. Special case TEMPORARY_HOLD: when the
+  // server didn't attach any questions to the hold step, our default copy
+  // ("a few last questions") is misleading — use the step's own caption.
+  let milestoneLabel = MILESTONE_LABELS[step.milestone] || step.caption || step.milestone || step.stepName || 'Step';
+  if (step.milestone === 'TEMPORARY_HOLD' && !hasQuestions) {
+    milestoneLabel = 'Confirm your booking';
+  }
+
   return (
     <div className="space-y-4">
-      <section className="card p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="text-xs text-slate-500 uppercase tracking-wide">{step.milestone || step.stepName}</div>
-            <h2 className="text-lg font-semibold">{step.caption || 'Complete this step'}</h2>
+      {/* Step header card — milestone, sub-caption, expiry countdown, and any
+          inline error. Always rendered so the user sees where they are even
+          when the step itself has no input. */}
+      <section className="rounded-xl border border-slate-200 bg-white shadow-sm p-5">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-[11px] font-semibold text-brand-700 uppercase tracking-wider">
+              Step {step.sequenceNumber || ''} · {step.milestone || step.stepName}
+            </div>
+            <h2 className="text-xl font-semibold mt-0.5">{milestoneLabel}</h2>
+            {step.caption && step.caption !== milestoneLabel ? (
+              <p className="text-sm text-slate-600 mt-1">{step.caption}</p>
+            ) : null}
           </div>
           {remainingMs !== null ? (
-            <div className={'badge ' + (remainingMs < 60000 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-800')}>
-              Expires in {mins}m {String(secs).padStart(2, '0')}s
+            <div className={
+              'badge text-sm shrink-0 ' +
+              (remainingMs < 60000 ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-800')
+            }>
+              ⏱ Expires in {mins}m {String(secs).padStart(2, '0')}s
             </div>
           ) : null}
         </div>
 
         <div ref={errorRef} className="scroll-mt-24">
           {error ? (
-            <div className="mt-3"><ErrorBox error={error} /></div>
+            <div className="mt-4"><ErrorBox error={error} /></div>
           ) : step.status === 'FAILED' && step.error ? (
-            <div className="mt-3"><ErrorBox error={{ code: 'step_failed', message: step.error.customerErrorMessage || step.error.internalErrorMessage, details: step.error }} /></div>
+            <div className="mt-4"><ErrorBox error={{ code: 'step_failed', message: step.error.customerErrorMessage || step.error.internalErrorMessage, details: step.error }} /></div>
           ) : null}
         </div>
 
-        {hasFares ? (
-          <div className="mt-4">
-            <FareSelector
-              fareDetails={step.fareDetails}
-              selections={fareSel}
-              onChange={setFareSel}
-              addOns={addOnSel}
-              onAddOnChange={setAddOnSel}
-              markup={markup}
-            />
-          </div>
-        ) : null}
-
-        {hasQuestions ? (
-          <div className="mt-4 space-y-6">
-            {step.questions.questionGroups.map((g, gi) => (
-              <div key={gi}>
-                {g.caption ? <h3 className="font-semibold mb-2">{g.caption}</h3> : null}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {(g.questions || []).map((q) => (
-                    <QuestionRenderer
-                      key={q.uuid}
-                      question={q}
-                      value={answers[q.uuid]}
-                      // Functional setState so browser autofill / rapid typing
-                      // doesn't drop values via stale closure over `answers`.
-                      onChange={(v) => setAnswers((prev) => ({ ...prev, [q.uuid]: v }))}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : null}
-
-        {hasQuote ? (
-          <div className="mt-4">
-            <h3 className="font-semibold mb-2">Quote</h3>
-            <QuoteView quote={step.finalQuote} markup={markup} />
-          </div>
-        ) : null}
-
-        {!hasFares && !hasQuestions && !hasQuote ? (
-          <p className="text-sm text-slate-600 mt-3">
+        {!hasFares && !hasQuestions && !hasQuote && !needsPayment ? (
+          <p className="text-sm text-slate-600 mt-4">
             No additional input needed — just continue.
           </p>
         ) : null}
-
-        {needsPayment ? (
-          <div className="mt-6 pt-6 border-t border-slate-200">
-            <BraintreeDropIn
-              ref={dropinRef}
-              amount={totalUsdDisplay}
-              onRequestableChange={onRequestableChange}
-            />
-          </div>
-        ) : null}
       </section>
 
-      <div className="flex justify-between gap-3">
-        <div>
-          {step.allowBackHere && step.sequenceNumber > 1 ? (
-            <button className="btn-secondary" disabled={submitting} onClick={onBack}>
-              ← Back
+      {/* Each interaction surfaces in its own titled section card so users
+          can scan the page top-to-bottom: tickets → details → quote → pay. */}
+      {hasFares ? (
+        <SectionCard
+          eyebrow="Step A"
+          title="Choose your tickets"
+          subtitle="Pick a variant, time slot, and the fares for your party."
+        >
+          <FareSelector
+            fareDetails={step.fareDetails}
+            selections={fareSel}
+            onChange={setFareSel}
+            addOns={addOnSel}
+            onAddOnChange={setAddOnSel}
+            markup={markup}
+          />
+        </SectionCard>
+      ) : null}
+
+      {hasQuestions ? (
+        <SectionCard
+          eyebrow={hasFares ? 'Step B' : 'Step A'}
+          title={questionSectionTitle(step)}
+          subtitle="Required fields are marked with *."
+        >
+          <div className="space-y-8">
+            {step.questions.questionGroups.map((g, gi) => {
+              // Highlight question groups that branch the flow (e.g. the
+              // "ask questions in TEMPORARY_HOLD step" trigger on Product 2's
+              // FINAL_QUOTE) — without a callout it's easy to skim past these
+              // among the passenger-detail groups and miss a downstream prompt.
+              const isBranchGroup = isBranchingGroup(g);
+              const wrapperCls =
+                (gi > 0 ? 'pt-6 border-t border-slate-100 ' : '') +
+                (isBranchGroup
+                  ? 'rounded-lg bg-amber-50/60 ring-1 ring-amber-200 p-4 mt-2'
+                  : '');
+              return (
+                <div key={gi} className={wrapperCls}>
+                  {g.caption ? (
+                    <h4 className={
+                      'font-semibold mb-3 ' +
+                      (isBranchGroup ? 'text-amber-900' : 'text-slate-800')
+                    }>
+                      {isBranchGroup ? '⚑ ' : ''}{g.caption}
+                    </h4>
+                  ) : null}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+                    {(g.questions || []).map((q) => (
+                      <QuestionRenderer
+                        key={q.uuid}
+                        question={q}
+                        value={answers[q.uuid]}
+                        // Functional setState so browser autofill / rapid typing
+                        // doesn't drop values via stale closure over `answers`.
+                        onChange={(v) => setAnswers((prev) => ({ ...prev, [q.uuid]: v }))}
+                        // Pass the full answers map + a generic setter so
+                        // SELECT_SINGLE can render any follow-up questions
+                        // attached to the selected option (e.g. Salzburg's
+                        // Frequent Flyer Number) into the same answers store.
+                        answers={answers}
+                        setAnswer={(uuid, v) => setAnswers((prev) => ({ ...prev, [uuid]: v }))}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </SectionCard>
+      ) : null}
+
+      {hasQuote ? (
+        <SectionCard
+          eyebrow="Review"
+          title="Your booking summary"
+          subtitle="Final price including taxes and surcharges."
+        >
+          <QuoteView quote={step.finalQuote} markup={markup} />
+        </SectionCard>
+      ) : null}
+
+      {needsPayment ? (
+        <SectionCard
+          eyebrow="Payment"
+          title="Card details"
+          subtitle={totalUsdDisplay ? `You'll be charged ${totalUsdDisplay} when you confirm.` : 'Enter your card to confirm the booking.'}
+        >
+          <BraintreeDropIn
+            ref={dropinRef}
+            amount={totalUsdDisplay}
+            onRequestableChange={onRequestableChange}
+          />
+        </SectionCard>
+      ) : null}
+
+      {/* Sticky action bar — keeps Continue / Confirm in reach no matter
+          how long the form is. */}
+      <div className="sticky bottom-0 -mx-2 px-2 py-3 bg-gradient-to-t from-white via-white to-transparent">
+        <div className="flex justify-between gap-3">
+          <div>
+            {step.allowBackHere && step.sequenceNumber > 1 ? (
+              <button className="btn-secondary" disabled={submitting} onClick={onBack}>
+                ← Back
+              </button>
+            ) : null}
+          </div>
+          <div className="flex gap-2">
+            {hasFares ? (
+              <button className="btn-secondary" disabled={submitting} onClick={onPreview}>
+                Preview price
+              </button>
+            ) : null}
+            <button
+              className="btn-primary"
+              disabled={submitting || (needsPayment && !canPay) || cooldownSecs > 0}
+              onClick={onNext}
+              title={
+                cooldownSecs > 0
+                  ? `Braintree duplicate-transaction window — available in ${cooldownSecs}s`
+                  : needsPayment && !canPay
+                  ? 'Please fill in your card details first'
+                  : undefined
+              }
+            >
+              {submitLabel}
             </button>
-          ) : null}
-        </div>
-        <div className="flex gap-2">
-          {hasFares ? (
-            <button className="btn-secondary" disabled={submitting} onClick={onPreview}>
-              Preview price
-            </button>
-          ) : null}
-          <button
-            className="btn-primary"
-            disabled={submitting || (needsPayment && !canPay) || cooldownSecs > 0}
-            onClick={onNext}
-            title={
-              cooldownSecs > 0
-                ? `Braintree duplicate-transaction window — available in ${cooldownSecs}s`
-                : needsPayment && !canPay
-                ? 'Please fill in your card details first'
-                : undefined
-            }
-          >
-            {submitLabel}
-          </button>
+          </div>
         </div>
       </div>
     </div>
+  );
+}
+
+// Friendly label for each Livn milestone. Falls back to step.caption then
+// the raw enum name in StepView when no entry exists.
+const MILESTONE_LABELS = {
+  FARE_SELECTION: 'Choose your tickets',
+  PASSENGER_DETAILS: 'Passenger details',
+  PICKUP_DROPOFF: 'Pickup & drop-off',
+  PICKUP_DETAILS: 'Pickup & drop-off',
+  PAX_COUNT: 'How many travellers?',
+  FINAL_QUOTE: 'Review your booking',
+  TEMPORARY_HOLD: 'Almost there — a few last questions',
+  CONFIRMED_BOOKING: 'Confirm and pay',
+};
+
+// A "branching" group is one whose answers change the shape of later steps
+// (e.g. Product 2's "Ask questions in the TEMPORARY_HOLD step" trigger, or
+// the frequent-flyer YES/NO that adds a regex follow-up). Detect by group
+// caption keywords and by the presence of a BOOLEAN question — not perfect,
+// but good enough to surface the group with an amber callout so the user
+// doesn't skim past it.
+function isBranchingGroup(group) {
+  const cap = String(group?.caption || '').toLowerCase();
+  if (/temporary[_\s]?hold|frequent\s*flyer|conditional|optional\s+question/.test(cap)) {
+    return true;
+  }
+  const qs = group?.questions || [];
+  if (qs.length === 1 && String(qs[0]?.answerType || '').toUpperCase() === 'BOOLEAN') {
+    return true;
+  }
+  return false;
+}
+
+function questionSectionTitle(step) {
+  const m = step.milestone || '';
+  if (m.includes('PASSENGER')) return 'Passenger details';
+  if (m.includes('PICKUP')) return 'Pickup & drop-off';
+  if (m === 'PAX_COUNT') return 'Number of travellers';
+  if (m === 'TEMPORARY_HOLD') return 'A few final questions';
+  if (m === 'FARE_SELECTION') return 'A few more details';
+  return 'Tell us more';
+}
+
+function SectionCard({ eyebrow, title, subtitle, children }) {
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+      <header className="px-5 py-4 border-b border-slate-200 bg-slate-50/60">
+        {eyebrow ? (
+          <div className="text-[10px] font-semibold text-brand-700 uppercase tracking-widest">
+            {eyebrow}
+          </div>
+        ) : null}
+        <h3 className="text-base font-semibold text-slate-900 mt-0.5">{title}</h3>
+        {subtitle ? (
+          <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>
+        ) : null}
+      </header>
+      <div className="p-5">{children}</div>
+    </section>
   );
 }
 
@@ -685,36 +840,68 @@ function validateStep(step, fareSel, answers) {
   }
   const groups = step.questions?.questionGroups || [];
   for (const g of groups) {
-    for (const q of g.questions || []) {
-      const v = answers?.[q.uuid];
-      const empty =
-        v === undefined || v === null || v === '' ||
-        (Array.isArray(v) && v.length === 0);
-      if (empty) {
-        if (!q.required) continue;
-        const label = q.title || q.question || 'a required field';
+    for (const topQ of g.questions || []) {
+      // Walk the question AND any follow-up questions reachable through the
+      // currently-selected option (Salzburg's Frequent Flyer Number is a
+      // 10-digit regex TEXT field that appears once the user picks "Yes" on
+      // the parent SELECT_SINGLE — it lives inside that option's payload).
+      for (const q of walkActiveQuestions(topQ, answers)) {
+        const issue = validateOneQuestion(q, answers);
+        if (issue) return issue;
+      }
+    }
+  }
+  return null;
+}
+
+// Required / regex / numeric-bounds checks for a single question. Pulled out
+// so the same rules apply to top-level AND option-gated follow-up questions.
+function validateOneQuestion(q, answers) {
+  const v = answers?.[q.uuid];
+  const empty =
+    v === undefined || v === null || v === '' ||
+    (Array.isArray(v) && v.length === 0);
+  if (empty) {
+    if (!q.required) return null;
+    const label = q.title || q.question || 'a required field';
+    return {
+      message: `Please fill in "${label}" before paying.`,
+      questionUuid: q.uuid,
+    };
+  }
+  // Regex validation runs whether the field is required or not — once the
+  // user has filled it in it must match. Used by Salzburg's Frequent Flyer
+  // follow-up (\d{10}) and any cert Product 4 regex prompt.
+  if (q.regex) {
+    try {
+      const re = new RegExp(q.regex);
+      const stringVal = Array.isArray(v) ? v.join(',') : String(v);
+      if (!re.test(stringVal)) {
+        const label = q.title || q.question || 'this field';
         return {
-          message: `Please fill in "${label}" before paying.`,
+          message: `"${label}" doesn't match the required format (${q.regex}).`,
           questionUuid: q.uuid,
         };
       }
-      // Regex validation runs whether the field is required or not — once
-      // the user has filled it in it must match. Used by Salzburg's frequent
-      // flyer follow-up question and any cert product 4 regex prompt.
-      if (q.regex) {
-        try {
-          const re = new RegExp(q.regex);
-          const stringVal = Array.isArray(v) ? v.join(',') : String(v);
-          if (!re.test(stringVal)) {
-            const label = q.title || q.question || 'this field';
-            return {
-              message: `"${label}" doesn't match the required format (${q.regex}).`,
-              questionUuid: q.uuid,
-            };
-          }
-        } catch (_) {
-          // A malformed regex from the supplier should not block submission.
-        }
+    } catch (_) {
+      // A malformed regex from the supplier should not block submission.
+    }
+  }
+  // Numeric bounds — PAX_COUNT and similar integer questions carry min/max
+  // constraints under several different field names depending on the supplier,
+  // and sometimes only as prose in the description. questionNumericBounds()
+  // tries every shape so we and the renderer never disagree.
+  const t = String(q.answerType || '').toUpperCase();
+  if (t === 'NUMBER' || t === 'INTEGER' || t === 'DECIMAL' || t === 'FLOAT') {
+    const num = Number(v);
+    if (Number.isFinite(num)) {
+      const { min: lo, max: hi } = questionNumericBounds(q);
+      const label = q.title || q.question || 'value';
+      if (lo != null && num < lo) {
+        return { message: `"${label}" must be at least ${lo}.`, questionUuid: q.uuid };
+      }
+      if (hi != null && num > hi) {
+        return { message: `"${label}" can't be more than ${hi}.`, questionUuid: q.uuid };
       }
     }
   }
@@ -874,102 +1061,277 @@ function serializeAnswerValue(v) {
 }
 
 function ConfirmedView({ flow }) {
+  const { formatUsd, formatUsdText } = useMoney();
   const bookings = flow.bookings || [];
-  return (
-    <div className="space-y-4">
-      <div className="rounded-md border border-green-200 bg-green-50 p-4">
-        <div className="font-semibold text-green-800">✓ Booking confirmed</div>
-        <div className="text-sm text-green-700">Livn reference: <span className="font-mono">{flow.livnReference}</span></div>
-      </div>
+  const flowQuote = findQuoteInFlow(flow);
+  const flowMarkup = getProductMarkup(flow.product);
+  const flowTotal = flowQuote ? applyMarkup(pickTotal(flowQuote), flowMarkup) : null;
 
-      {bookings.map((b) => (
-        <div key={b.id} className="card p-5">
-          <div className="flex justify-between items-start gap-4 flex-wrap">
-            <div className="min-w-0">
-              <div className="text-xs text-slate-500">Booking #{b.id}</div>
-              <div className="font-semibold">{b.productName || `Product ${b.productId}`}</div>
-              <div className="text-sm mt-1">{b.partyName} · {b.partyEmailAddress}</div>
+  return (
+    <div className="space-y-5">
+      {/* Hero confirmation banner — green so the customer immediately knows
+          the booking went through, plus the headline numbers/refs they'll
+          want at hand. */}
+      <div className="rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 border border-emerald-200 p-5">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <div className="inline-flex items-center gap-2 text-emerald-800">
+              <span className="inline-flex items-center justify-center h-7 w-7 rounded-full bg-emerald-600 text-white">✓</span>
+              <span className="font-semibold text-lg">Booking confirmed</span>
             </div>
-            <div className="text-right text-xs text-slate-500 shrink-0 space-y-0.5">
-              <div>Livn: <span className="font-mono">{b.livnReference}</span></div>
-              {b.supplierReference ? <div>supplier: <span className="font-mono">{b.supplierReference}</span></div> : null}
-              {b.clientReference ? <div>client: <span className="font-mono">{b.clientReference}</span></div> : null}
+            <div className="text-sm text-emerald-800 mt-2">
+              A confirmation has been sent to your email. Save this page or
+              your PDF voucher in case you need it on the day.
+            </div>
+            <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-sm">
+              <span>
+                <span className="text-emerald-700/70">Livn reference</span>{' '}
+                <span className="font-mono font-semibold text-emerald-900">{flow.livnReference}</span>
+              </span>
+              {flowTotal ? (
+                <span>
+                  <span className="text-emerald-700/70">Total paid</span>{' '}
+                  <span className="font-semibold text-emerald-900 tabular-nums">{formatUsd(flowTotal)}</span>
+                </span>
+              ) : null}
             </div>
           </div>
-
-          {b.tickets?.length ? (
-            <div className="mt-4">
-              {/* Cert wording: "Make sure the application can handle group
-                  booking tickets and single passenger tickets." We tell the
-                  two apart by ticket count vs party size — one ticket
-                  covering multiple passengers means a group ticket. */}
-              <h4 className="font-semibold text-sm mb-2">
-                Tickets
-                {b.tickets.length === 1 && (b.tickets[0]?.passengerDetails?.length || 0) > 1 ? (
-                  <span className="ml-2 badge bg-slate-100 text-slate-700 text-[10px]">group ticket</span>
-                ) : b.tickets.length > 1 ? (
-                  <span className="ml-2 badge bg-slate-100 text-slate-700 text-[10px]">{b.tickets.length} individual tickets</span>
-                ) : null}
-              </h4>
-              <div className="space-y-2">
-                {b.tickets.map((t) => {
-                  const paxNames = (t.passengerDetails || []).map((p) => p?.name).filter(Boolean);
-                  const prodName = (t.productDetails || [])[0]?.name;
-                  // Some products (cert Product 3) attach barcodes — display
-                  // them inline so the ticket detail is self-contained.
-                  const barcodes = Array.isArray(t.barcodes) ? t.barcodes : (t.barcode ? [t.barcode] : []);
-                  return (
-                    <div key={t.id} className="flex justify-between items-start border border-slate-200 rounded p-2 text-sm gap-2">
-                      <div className="min-w-0 space-y-0.5">
-                        <div className="font-medium">
-                          Ticket #{t.id}{paxNames.length ? ' — ' + paxNames.join(', ') : ''}
-                        </div>
-                        {prodName ? <div className="text-xs text-slate-500 truncate">{prodName}</div> : null}
-                        {barcodes.map((bc, i) => (
-                          <div key={i} className="text-xs text-slate-500">
-                            {bc.format || 'Code'}: <span className="font-mono">{bc.content || bc.value}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <a
-                        href={`/api/livn/tickets/${t.id}/pdf`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="btn-secondary shrink-0"
-                      >
-                        PDF
-                      </a>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ) : null}
-
-          {b.externalResources?.length ? (
-            <div className="mt-4">
-              <h4 className="font-semibold text-sm mb-2">Additional resources</h4>
-              <ul className="list-disc pl-5 text-sm space-y-1">
-                {b.externalResources.map((r, i) => (
-                  <li key={i}>
-                    <a href={r.url} target="_blank" rel="noreferrer" className="text-brand-700 underline">
-                      {r.title || r.type || r.url}
-                    </a>
-                    {r.required ? <span className="badge bg-red-100 text-red-700 ml-2">required</span> : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-
-          <div className="mt-4 flex gap-2 flex-wrap">
-            <a className="btn-secondary" target="_blank" rel="noreferrer" href={`/api/livn/bookings/${b.id}/pdf`}>
-              Booking voucher PDF
-            </a>
-            <Link className="btn-secondary" href={`/bookings/${b.id}`}>Open booking</Link>
+          <div className="text-emerald-700">
+            <ShieldCheckIcon />
           </div>
         </div>
-      ))}
+      </div>
+
+      {bookings.map((b) => <BookingCard key={b.id} booking={b} formatUsdText={formatUsdText} />)}
     </div>
+  );
+}
+
+function BookingCard({ booking: b, formatUsdText }) {
+  // Travel date can live at the booking root or on the first ticket. Prefer
+  // the booking-level field so we don't conflict with multi-day products
+  // where individual tickets have their own travel dates.
+  const travelDate = b.travelDate
+    || b.tickets?.[0]?.travelDate
+    || b.tickets?.[0]?.productDetails?.[0]?.startTime;
+
+  const ticketCount = (b.tickets || []).length;
+  const totalPax = (b.tickets || []).reduce((n, t) => n + (t.passengerDetails?.length || 0), 0);
+  const ticketKind = ticketCount === 1 && totalPax > 1
+    ? { label: 'Group ticket', tone: 'bg-indigo-100 text-indigo-800' }
+    : ticketCount > 1
+    ? { label: `${ticketCount} individual tickets`, tone: 'bg-slate-100 text-slate-700' }
+    : null;
+
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+      <header className="px-5 py-4 border-b border-slate-100 bg-slate-50/60">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-[10px] font-semibold text-brand-700 uppercase tracking-widest">
+              Booking #{b.id}
+            </div>
+            <h3 className="text-lg font-semibold mt-0.5">{b.productName || `Product ${b.productId}`}</h3>
+            <div className="text-sm text-slate-600 mt-1">
+              {b.partyName}{b.partyEmailAddress ? ` · ${b.partyEmailAddress}` : ''}
+            </div>
+          </div>
+          {ticketKind ? (
+            <span className={'badge ' + ticketKind.tone}>{ticketKind.label}</span>
+          ) : null}
+        </div>
+
+        {/* Quick-facts strip: travel date, confirmed-at, references */}
+        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-xs">
+          {travelDate ? (
+            <Fact label="Travel date" value={formatDateMaybe(travelDate)} />
+          ) : null}
+          {b.confirmed ? (
+            <Fact label="Confirmed" value={formatDateTimeMaybe(b.confirmed)} />
+          ) : null}
+          <Fact label="Livn ref" value={b.livnReference} mono />
+          {b.supplierReference ? <Fact label="Supplier ref" value={b.supplierReference} mono /> : null}
+          {b.clientReference ? <Fact label="Client ref" value={b.clientReference} mono /> : null}
+        </div>
+      </header>
+
+      <div className="p-5 space-y-5">
+        {b.tickets?.length ? (
+          <div>
+            <h4 className="font-semibold text-sm text-slate-800 mb-3">Your tickets</h4>
+            <div className="space-y-3">
+              {b.tickets.map((t) => (
+                <ConfirmedTicketRow key={t.id} ticket={t} formatUsdText={formatUsdText} />
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {b.cancellationPolicy?.text ? (
+          <details className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-sm">
+            <summary className="cursor-pointer select-none font-medium text-slate-800">
+              Cancellation policy
+              {b.cancellationPolicy.setAtTimeOfBooking ? (
+                <span className="ml-2 badge bg-slate-200 text-slate-700 text-[10px]">set at booking</span>
+              ) : null}
+            </summary>
+            <div className="mt-2 text-slate-700 whitespace-pre-wrap">
+              {formatUsdText(b.cancellationPolicy.text)}
+            </div>
+          </details>
+        ) : null}
+
+        {b.externalResources?.length ? (
+          <div>
+            <h4 className="font-semibold text-sm text-slate-800 mb-2">Additional resources from the supplier</h4>
+            <ul className="space-y-1.5 text-sm">
+              {b.externalResources.map((r, i) => (
+                <li key={i} className="flex items-center gap-2">
+                  <LinkIcon />
+                  <a href={r.url} target="_blank" rel="noreferrer" className="text-brand-700 underline">
+                    {r.title || r.type || r.url}
+                  </a>
+                  {r.required ? (
+                    <span className="badge bg-red-100 text-red-700 text-[10px]">required</span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        <div className="flex gap-2 flex-wrap pt-2 border-t border-slate-100">
+          <a className="btn-primary" target="_blank" rel="noreferrer" href={`/api/livn/bookings/${b.id}/pdf`}>
+            Download voucher PDF
+          </a>
+          <Link className="btn-secondary" href={`/bookings/${b.id}`}>View full details →</Link>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ConfirmedTicketRow({ ticket: t, formatUsdText }) {
+  const paxNames = (t.passengerDetails || []).map((p) => p?.name).filter(Boolean);
+  const primaryProduct = (t.productDetails || [])[0];
+  const barcodes = Array.isArray(t.barcodes) ? t.barcodes : (t.barcode ? [t.barcode] : []);
+  const pickup = t.pickupDetails;
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white">
+      <div className="flex items-start justify-between gap-3 p-4">
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-semibold text-slate-900">Ticket #{t.id}</span>
+            {t.printRequired ? (
+              <span className="badge bg-amber-100 text-amber-800 text-[10px]">Must be printed</span>
+            ) : null}
+          </div>
+          {paxNames.length ? (
+            <div className="text-sm text-slate-700">
+              <span className="text-slate-500">Passengers: </span>
+              {paxNames.join(', ')}
+            </div>
+          ) : null}
+          {primaryProduct?.name ? (
+            <div className="text-sm text-slate-600">{primaryProduct.name}</div>
+          ) : null}
+          <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-500">
+            {primaryProduct?.startTime ? <span>Starts {primaryProduct.startTime}</span> : null}
+            {t.travelDate ? <span>Travel {formatDateMaybe(t.travelDate)}</span> : null}
+          </div>
+          {t.supplierName ? (
+            <div className="text-xs text-slate-500">
+              Operated by <span className="font-medium text-slate-700">{t.supplierName}</span>
+              {t.supplierEmailRes ? ` · ${t.supplierEmailRes}` : ''}
+              {t.supplierPhoneRes ? ` · ${t.supplierPhoneRes}` : ''}
+            </div>
+          ) : null}
+          {barcodes.length ? (
+            <div className="mt-1 flex flex-wrap gap-2">
+              {barcodes.map((bc, i) => (
+                <span key={i} className="inline-flex items-center gap-1 rounded bg-slate-100 ring-1 ring-slate-200 px-2 py-0.5 text-[11px]">
+                  <span className="text-slate-500">{bc.format || 'Code'}:</span>
+                  <span className="font-mono text-slate-800">{bc.content || bc.value}</span>
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <a
+          href={`/api/livn/tickets/${t.id}/pdf`}
+          target="_blank"
+          rel="noreferrer"
+          className="btn-secondary shrink-0"
+        >
+          Ticket PDF
+        </a>
+      </div>
+
+      {(pickup?.notes || pickup?.dropoffNotes || pickup?.location) ? (
+        <div className="px-4 py-3 border-t border-slate-100 bg-slate-50/60 text-xs text-slate-600 space-y-1">
+          {pickup.notes ? (
+            <div><span className="font-semibold text-slate-700">Pickup:</span> {pickup.notes}</div>
+          ) : null}
+          {pickup.dropoffNotes ? (
+            <div><span className="font-semibold text-slate-700">Drop-off:</span> {pickup.dropoffNotes}</div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {t.specialNotes ? (
+        <div className="px-4 py-3 border-t border-amber-100 bg-amber-50/60 text-xs text-amber-900 whitespace-pre-wrap">
+          <span className="font-semibold">Important: </span>{formatUsdText(t.specialNotes)}
+        </div>
+      ) : null}
+
+      {t.localFees ? (
+        <div className="px-4 py-3 border-t border-slate-100 bg-amber-50 text-xs text-amber-900">
+          <span className="font-semibold">Local fees payable on the day: </span>{formatUsdText(t.localFees)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Fact({ label, value, mono }) {
+  if (value == null || value === '') return null;
+  return (
+    <span>
+      <span className="text-slate-500">{label}:</span>{' '}
+      <span className={'font-medium text-slate-800 ' + (mono ? 'font-mono' : '')}>{value}</span>
+    </span>
+  );
+}
+
+function formatDateMaybe(v) {
+  if (!v) return '';
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return String(v);
+  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function formatDateTimeMaybe(v) {
+  if (!v) return '';
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return String(v);
+  return d.toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function ShieldCheckIcon() {
+  return (
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M12 2 4 5v6c0 5 3.5 9 8 11 4.5-2 8-6 8-11V5l-8-3z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+      <path d="m9 12 2 2 4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function LinkIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden className="text-slate-500 shrink-0">
+      <path d="M9 15a4 4 0 0 0 5.66 0l3.18-3.18a4 4 0 0 0-5.66-5.66L11 7.34" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M15 9a4 4 0 0 0-5.66 0L6.16 12.18a4 4 0 0 0 5.66 5.66L13 16.66" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
   );
 }

@@ -10,7 +10,7 @@ import { useMoney } from '@/components/MoneyProvider';
 export default function ProductDetailPage() {
   const { id } = useParams();
   const router = useRouter();
-  const { formatUsd, formatUsdText } = useMoney();
+  const { formatUsd, formatUsdText, preferredDisplayCurrency, setPreferredDisplayCurrency } = useMoney();
 
   const [product, setProduct] = useState(null);
   const [error, setError] = useState(null);
@@ -66,17 +66,36 @@ export default function ProductDetailPage() {
   }, [product, id]);
 
   // Livn returns the supplier-supported booking currencies on the product.
-  // Some products (e.g. Salzburg) accept AUD/EUR/USD and the Livn cert
-  // requires us to let the user pick, so we render a select when there's
-  // more than one option. We always *display* prices via MoneyProvider's
-  // USD conversion regardless of which currency the booking is settled in.
+  // Some products (e.g. Salzburg) accept AUD/EUR/USD and the cert requires
+  // us to let the user pick. The selected currency drives BOTH:
+  //   1. the currency Livn settles the booking in (sent in /flows POST)
+  //   2. the display target — sticky "From" price, calendar tiles, fares
+  //      and quote all flip to that currency immediately so the customer
+  //      sees one consistent number from product → checkout.
+  // Default booking-currency to the user's active display preference when
+  // the product supports it, else fall back to the supplier's first listed
+  // currency. NEVER touch preferredDisplayCurrency from this side-effect —
+  // doing so used to silently overwrite the user's header pick the moment
+  // they opened a product page.
   const currencies = product?.currencies || [];
   const [currency, setCurrency] = useState('');
   useEffect(() => {
-    // Default to the first currency once product loads. Stays empty until then
-    // so the <select> doesn't briefly select a wrong value.
-    if (!currency && currencies.length) setCurrency(currencies[0]);
-  }, [currencies, currency]);
+    if (currency || !currencies.length) return;
+    setCurrency(
+      currencies.includes(preferredDisplayCurrency)
+        ? preferredDisplayCurrency
+        : currencies[0]
+    );
+  }, [currencies, currency, preferredDisplayCurrency]);
+
+  // Bound to the booking-currency <select>. An explicit pick from this
+  // dropdown propagates to the catalog-wide header preference so display and
+  // booking stay in sync from here through checkout. (The plain useEffect
+  // above is read-only — it only mirrors the header into local state.)
+  function handleCurrencyChange(next) {
+    setCurrency(next);
+    setPreferredDisplayCurrency(next);
+  }
 
   const imagesToShow = useMemo(() => {
     const imgs = product?.images || [];
@@ -319,6 +338,7 @@ export default function ProductDetailPage() {
               onChange={setSelectedDate}
               departures={departures}
               loading={depLoading}
+              markup={productMarkup}
             />
             {selectedDate ? (
               <div className="mt-2 text-xs text-slate-600">
@@ -334,14 +354,14 @@ export default function ProductDetailPage() {
                 id="booking-currency"
                 className="input"
                 value={currency}
-                onChange={(e) => setCurrency(e.target.value)}
+                onChange={(e) => handleCurrencyChange(e.target.value)}
               >
                 {currencies.map((c) => (
                   <option key={c} value={c}>{c}</option>
                 ))}
               </select>
               <p className="text-xs text-slate-500 mt-1">
-                The booking is settled in this currency; prices are displayed in USD.
+                Prices on this page and your booking will both use {currency}.
               </p>
             </div>
           ) : null}

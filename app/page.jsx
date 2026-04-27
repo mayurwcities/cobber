@@ -1,8 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ProductCard from '@/components/ProductCard';
 import { Loading, ErrorBox, Empty } from '@/components/States';
 import { apiGet, apiPost, pickList } from '@/lib/api';
+import { scrollToElement } from '@/lib/scroll';
 
 export default function Home() {
   // Default to live so the home page always shows real products with images.
@@ -11,6 +12,12 @@ export default function Home() {
   const [error, setError] = useState(null);
   const [products, setProducts] = useState([]);
   const [meta, setMeta] = useState(null);
+
+  // Anchor for auto-scroll after the user clicks Search. Only scrolls when
+  // the search is user-initiated (justSearched flag) — not on the initial
+  // page load, where we don't want to yank the hero out of view.
+  const resultsRef = useRef(null);
+  const justSearched = useRef(false);
 
   const [localFilters, setLocalFilters] = useState({
     supplierId: '',
@@ -125,8 +132,22 @@ export default function Home() {
 
   function submit(e) {
     e.preventDefault();
+    // Mark this run as user-initiated so the loading-finished effect knows
+    // to scroll the results into view (the initial page-load fetch shouldn't).
+    justSearched.current = true;
     mode === 'local' ? runLocal() : runLive();
   }
+
+  // After a user-initiated search finishes, ease the results section into
+  // view so the user lands on the cards without having to scroll past the
+  // hero + filters every time.
+  useEffect(() => {
+    if (loading) return;
+    if (!justSearched.current) return;
+    justSearched.current = false;
+    // Wait a tick for the result grid to lay out before scrolling.
+    setTimeout(() => scrollToElement(resultsRef.current, 80), 50);
+  }, [loading]);
 
   const resultCount = meta?.total ?? products.length;
 
@@ -272,16 +293,25 @@ export default function Home() {
             </>
           )}
           <div className="md:col-span-4 flex gap-2 justify-end pt-1">
-            <button type="submit" className="btn-primary">
-              <SearchIcon />
-              Search
+            <button type="submit" className="btn-primary min-w-[120px]" disabled={loading}>
+              {loading ? (
+                <>
+                  <Spinner />
+                  Searching…
+                </>
+              ) : (
+                <>
+                  <SearchIcon />
+                  Search
+                </>
+              )}
             </button>
           </div>
         </form>
       </section>
 
       {/* Results */}
-      <section className="space-y-4">
+      <section ref={resultsRef} className="space-y-4 scroll-mt-24">
         {loading ? <Loading /> : null}
         {!loading && error ? (
           <ErrorBox
@@ -406,6 +436,15 @@ function filterByText(products, raw) {
     ].filter(Boolean).join(' ').toLowerCase();
     return tokens.every((t) => hay.includes(t));
   });
+}
+
+function Spinner() {
+  return (
+    <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="3" opacity="0.25" />
+      <path d="M21 12a9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 function SearchIcon() {

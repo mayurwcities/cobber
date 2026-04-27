@@ -1,6 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useMoney } from '@/components/MoneyProvider';
 
 const NAV = [
   { href: '/',         label: 'Browse' },
@@ -9,10 +10,18 @@ const NAV = [
   { href: '/admin',    label: 'Admin' },
 ];
 
+// Short list of currencies we surface in the picker even before the FX rates
+// table loads from /api/exchange-rates. Once rates arrive we union this with
+// every code present in the table so the user can pick anything Livn supports.
+const PRIORITY_CURRENCIES = ['USD', 'EUR', 'GBP', 'AUD', 'NZD', 'CAD', 'JPY'];
+
 export default function Header() {
   const pathname = usePathname() || '/';
   const isActive = (href) =>
     href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(href + '/');
+  // Hide the picker on /checkout/* — that flow's currency is fixed at flow
+  // start, so a header-level selector there would only confuse things.
+  const onCheckout = pathname.startsWith('/checkout');
 
   return (
     <header className="sticky top-0 z-30 backdrop-blur bg-white/75 border-b border-slate-200/70">
@@ -56,6 +65,7 @@ export default function Header() {
         </nav>
 
         <div className="flex items-center gap-2">
+          {onCheckout ? null : <CurrencyPicker />}
           <Link href="/admin" className="hidden sm:inline-flex btn-secondary">
             Sync catalog
           </Link>
@@ -85,6 +95,44 @@ export default function Header() {
         </div>
       </nav>
     </header>
+  );
+}
+
+function CurrencyPicker() {
+  const { preferredDisplayCurrency, setPreferredDisplayCurrency, rates } = useMoney();
+  // Build the option list: every currency present in the rates table, ranked
+  // with the priority list first so AUD/EUR/USD/etc. cluster at the top.
+  const codes = (() => {
+    const set = new Set(PRIORITY_CURRENCIES);
+    if (rates) for (const k of Object.keys(rates)) set.add(String(k).toUpperCase());
+    const all = Array.from(set);
+    const priority = PRIORITY_CURRENCIES.filter((c) => all.includes(c));
+    const rest = all.filter((c) => !PRIORITY_CURRENCIES.includes(c)).sort();
+    return [...priority, ...rest];
+  })();
+  return (
+    <label className="hidden sm:inline-flex items-center gap-1.5 text-xs text-ink-500" title="Display prices in this currency">
+      <CoinIcon />
+      <select
+        aria-label="Display currency"
+        value={preferredDisplayCurrency}
+        onChange={(e) => setPreferredDisplayCurrency(e.target.value)}
+        className="bg-transparent border-0 text-sm font-semibold text-ink-700 focus:outline-none focus:ring-0 cursor-pointer pr-1"
+      >
+        {codes.map((c) => (
+          <option key={c} value={c}>{c}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function CoinIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden className="text-ink-400">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M9 9h4.5a1.5 1.5 0 0 1 0 3H10a1.5 1.5 0 0 0 0 3h5M12 6v2m0 8v2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
   );
 }
 

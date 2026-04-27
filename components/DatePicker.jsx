@@ -1,6 +1,7 @@
 'use client';
 import { useMemo, useState } from 'react';
 import { useMoney } from '@/components/MoneyProvider';
+import { applyMarkup } from '@/lib/api';
 
 /**
  * Calendar date picker tuned for Livn's /departures endpoint.
@@ -22,8 +23,12 @@ export default function DatePicker({
   loading = false,
   minDate,
   maxDate,
+  // Net-rate markup fraction (0.20 for 20%). When non-zero, every fromPrice
+  // we render on the calendar is marked up so the dates the user sees match
+  // the ticket / quote prices later in the flow.
+  markup = 0,
 }) {
-  const { toUsd } = useMoney();
+  const { formatPriceCompact } = useMoney();
   // ---- normalise departures into a Map<iso, fromPrice> ----
   // All fromPrices for a given date represent the same trip in different
   // currencies; since we always display USD, any of them works.
@@ -32,11 +37,11 @@ export default function DatePicker({
     for (const d of departures || []) {
       const iso = typeof d === 'string' ? d : d?.date;
       if (!iso) continue;
-      const fp = (typeof d === 'object' && Array.isArray(d.fromPrices)) ? d.fromPrices[0] : null;
-      m.set(iso, fp);
+      const rawFp = (typeof d === 'object' && Array.isArray(d.fromPrices)) ? d.fromPrices[0] : null;
+      m.set(iso, applyMarkup(rawFp, markup));
     }
     return m;
-  }, [departures]);
+  }, [departures, markup]);
 
   const today = useMemo(() => {
     const d = new Date();
@@ -160,7 +165,7 @@ export default function DatePicker({
               </span>
               {fp && !disabled ? (
                 <span className={'text-[9px] mt-0.5 tabular-nums ' + (isSelected ? 'text-white/80' : 'text-brand-700')}>
-                  {formatCompactUsd(fp, toUsd)}
+                  {formatPriceCompact(fp)}
                 </span>
               ) : null}
             </button>
@@ -272,13 +277,3 @@ function buildMonthGrid(viewMonth) {
   return cells;
 }
 
-function formatCompactUsd(p, toUsd) {
-  const n = toUsd ? toUsd(p) : null;
-  if (n == null) {
-    // Rates not loaded yet — fall back to the raw amount so the grid isn't empty
-    if (!p || typeof p !== 'object' || typeof p.amount !== 'number') return '';
-    return p.amount >= 1000 ? Math.round(p.amount / 10) / 100 + 'k' : String(Math.round(p.amount));
-  }
-  if (n >= 1000) return '$' + (Math.round(n / 10) / 100) + 'k';
-  return '$' + Math.round(n);
-}
