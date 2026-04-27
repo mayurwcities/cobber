@@ -1,12 +1,13 @@
 'use client';
 import Link from 'next/link';
-import { truncate, formatDuration } from '@/lib/api';
+import { truncate, formatDuration, getProductMarkup, applyMarkup } from '@/lib/api';
 import { useMoney } from '@/components/MoneyProvider';
 
 export default function ProductCard({ product }) {
   const { formatUsd } = useMoney();
   const imageUrl = product?.images?.[0]?.url || product?.images?.[0] || null;
-  const from = Array.isArray(product?.fromPrices) ? product.fromPrices[0] : null;
+  const rawFrom = Array.isArray(product?.fromPrices) ? product.fromPrices[0] : null;
+  const from = applyMarkup(rawFrom, getProductMarkup(product));
   const categories = (product?.categories || []).map((c) => c?.name || c).filter(Boolean);
   const duration = formatDuration(product?.duration);
   const locCity = product?.locationsStart?.[0]?.city;

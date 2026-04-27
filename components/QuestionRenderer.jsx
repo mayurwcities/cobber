@@ -1,4 +1,5 @@
 'use client';
+import QtyStepper from '@/components/QtyStepper';
 
 // Defensive: the exact shape of a question varies by reservation system, so
 // we read optional fields with ?. and fall back gracefully.
@@ -127,19 +128,25 @@ export default function QuestionRenderer({ question, value, onChange }) {
       );
       break;
     case 'NUMBER':
-    case 'INTEGER':
+    case 'INTEGER': {
+      // Render integer-typed questions (passenger count, party size, etc.)
+      // with the same +/- stepper used everywhere else in checkout — no
+      // native browser arrow controls. Honors min/max from the question
+      // when provided, otherwise falls back to a sane 0–99 range.
+      const minVal = Number.isFinite(Number(q.min)) ? Number(q.min) : 0;
+      const maxVal = Number.isFinite(Number(q.max)) ? Number(q.max) : 99;
+      const current = Number.isFinite(Number(value)) ? Number(value) : minVal;
       control = (
-        <input
-          {...common}
-          type="number"
-          step="1"
-          placeholder={q.example || ''}
-          value={value ?? ''}
-          onChange={(e) => onChange(e.target.value)}
-          required={!!q.required}
+        <QtyStepper
+          qty={current}
+          min={minVal}
+          max={maxVal}
+          step={1}
+          onChange={(n) => onChange(String(n))}
         />
       );
       break;
+    }
     case 'DECIMAL':
     case 'FLOAT':
       control = (

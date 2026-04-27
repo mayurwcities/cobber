@@ -1,5 +1,5 @@
 'use client';
-import { pickTotal } from '@/lib/api';
+import { pickTotal, applyMarkup } from '@/lib/api';
 import { useMoney } from '@/components/MoneyProvider';
 
 /**
@@ -18,18 +18,38 @@ import { useMoney } from '@/components/MoneyProvider';
  *     generalTerms: "..."
  *   }
  */
-export default function QuoteView({ quote }) {
+export default function QuoteView({ quote, markup = 0 }) {
   const { formatUsd, formatUsdText } = useMoney();
   if (!quote) return null;
   const items = quote.lineItems || quote.items || [];
-  const total = pickTotal(quote);
+
+  // Cert: "You as the seller are responsible for applying the appropriate
+  // markup to prices supplied as net amounts (as indicated by the Boolean
+  // value of every quote.lineItem.salesComputationDetails.resSuppliedPriceIsNetRate)."
+  // We mark up only the line items flagged as net, then recompute the total
+  // from the marked-up subtotals so a Hybrid quote (gross + net items mixed)
+  // doesn't get double-marked or under-marked.
+  const lineMarkup = (li) => (
+    li?.salesComputationDetails?.resSuppliedPriceIsNetRate ? markup : 0
+  );
+
+  const computedTotalAmount = items.reduce((sum, li) => {
+    const sub = applyMarkup(li.grossTotal || li.totalPrice || li.price, lineMarkup(li));
+    const a = Number(sub?.amount);
+    return Number.isFinite(a) ? sum + a : sum;
+  }, 0);
+  const rawTotal = pickTotal(quote);
+  const total = items.length && computedTotalAmount > 0 && rawTotal
+    ? { ...rawTotal, amount: computedTotalAmount }
+    : applyMarkup(rawTotal, markup);
 
   return (
     <div className="space-y-3">
       <div className="divide-y divide-slate-100 border border-slate-200 rounded-md overflow-hidden">
         {items.map((li, i) => {
-          const unit = li.grossPerUnit || li.price;
-          const subtotal = li.grossTotal || li.totalPrice || li.price;
+          const m = lineMarkup(li);
+          const unit = applyMarkup(li.grossPerUnit || li.price, m);
+          const subtotal = applyMarkup(li.grossTotal || li.totalPrice || li.price, m);
           const qty = li.quantity ?? 1;
           const isSurcharge = (li.type || '').toUpperCase() === 'SURCHARGE' || (li.type || '').toUpperCase() === 'FEE';
           return (
@@ -63,7 +83,7 @@ export default function QuoteView({ quote }) {
             <div className="font-semibold">Total</div>
             {quote.netTotal && quote.grossTotal && quote.netTotal.amount !== quote.grossTotal.amount ? (
               <div className="text-xs text-slate-500">
-                Net: {formatUsd(quote.netTotal)} · Commission: {formatUsd(quote.commissionTotal || quote.contractCommTotal)}
+                Net: {formatUsd(applyMarkup(quote.netTotal, markup))} · Commission: {formatUsd(applyMarkup(quote.commissionTotal || quote.contractCommTotal, markup))}
               </div>
             ) : null}
           </div>
@@ -105,3 +125,4 @@ export default function QuoteView({ quote }) {
     </div>
   );
 }
+

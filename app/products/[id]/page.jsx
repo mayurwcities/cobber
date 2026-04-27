@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Loading, ErrorBox } from '@/components/States';
 import DatePicker from '@/components/DatePicker';
-import { apiGet, apiPost, formatDuration, formatAgeRange, formatLocation } from '@/lib/api';
+import { apiGet, apiPost, formatDuration, formatAgeRange, formatLocation, getProductMarkup, applyMarkup } from '@/lib/api';
 import { scrollToElement } from '@/lib/scroll';
 import { useMoney } from '@/components/MoneyProvider';
 
@@ -65,11 +65,18 @@ export default function ProductDetailPage() {
     })();
   }, [product, id]);
 
-  // Pick the first supplier-supported currency silently. We always display
-  // prices in USD (via MoneyProvider) but still need to tell Livn which
-  // currency to bill in when starting the flow.
+  // Livn returns the supplier-supported booking currencies on the product.
+  // Some products (e.g. Salzburg) accept AUD/EUR/USD and the Livn cert
+  // requires us to let the user pick, so we render a select when there's
+  // more than one option. We always *display* prices via MoneyProvider's
+  // USD conversion regardless of which currency the booking is settled in.
   const currencies = product?.currencies || [];
-  const currency = currencies[0] || '';
+  const [currency, setCurrency] = useState('');
+  useEffect(() => {
+    // Default to the first currency once product loads. Stays empty until then
+    // so the <select> doesn't briefly select a wrong value.
+    if (!currency && currencies.length) setCurrency(currencies[0]);
+  }, [currencies, currency]);
 
   const imagesToShow = useMemo(() => {
     const imgs = product?.images || [];
@@ -101,7 +108,9 @@ export default function ProductDetailPage() {
   if (!product) return null;
 
   const netRate = product?._pricing?.usesNetRates ?? product?.usesNetRates;
-  const fromPrices = product?._pricing?.fromPrices || product?.fromPrices || [];
+  const productMarkup = getProductMarkup(product);
+  const rawFromPrices = product?._pricing?.fromPrices || product?.fromPrices || [];
+  const fromPrices = rawFromPrices.map((p) => applyMarkup(p, productMarkup));
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -317,6 +326,25 @@ export default function ProductDetailPage() {
               </div>
             ) : null}
           </div>
+
+          {currencies.length > 1 ? (
+            <div className="mt-4">
+              <label className="label" htmlFor="booking-currency">Booking currency</label>
+              <select
+                id="booking-currency"
+                className="input"
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+              >
+                {currencies.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              <p className="text-xs text-slate-500 mt-1">
+                The booking is settled in this currency; prices are displayed in USD.
+              </p>
+            </div>
+          ) : null}
 
           <button
             onClick={startCheckout}

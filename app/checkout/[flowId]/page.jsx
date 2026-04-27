@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { apiGet, apiPut, apiPost, pickTotal } from '@/lib/api';
+import { apiGet, apiPut, apiPost, pickTotal, getProductMarkup, applyMarkup } from '@/lib/api';
 import { scrollToElement } from '@/lib/scroll';
 import { useMoney } from '@/components/MoneyProvider';
 import { Loading, ErrorBox } from '@/components/States';
@@ -75,6 +75,12 @@ export default function CheckoutPage() {
     if (!flow?.steps) return null;
     return flow.steps.find((s) => s.status === 'ACTIVE' || s.status === 'FAILED') || null;
   }, [flow]);
+
+  // Net-rate products: the supplier price is what we owe Livn, and we tack on
+  // a flat commission for the customer-facing price. Applied uniformly to fare
+  // selector display, server-quote display, and the Braintree auth so every
+  // visible/charged number agrees.
+  const markup = getProductMarkup(flow?.product);
 
   // Livn returns steps newest-first, so we can't look at steps[length - 1].
   // A flow is "done" when a CONFIRMED_BOOKING step exists AND is DONE,
@@ -163,20 +169,16 @@ export default function CheckoutPage() {
     let chargeAmount = null;
     let chargeCurrency = null;
 
-    if (needsPayment) {
-      // ------------------------------------------------------------
-      // 1) Client-side validation BEFORE we ever touch the card.
-      //    Authorize-then-void still leaves a visible auth in the
-      //    Braintree dashboard and may briefly tie up the customer's
-      //    available balance, so we only charge if the booking side
-      //    is fully ready.
-      // ------------------------------------------------------------
+    // Client-side validation runs on EVERY forward submit, not just the
+    // confirm-booking step — that way fare-selection violations
+    // (unitsMultipleOf, unitsMin) and regex-format violations on questions
+    // produce an inline error before we even hit the server, instead of
+    // waiting for Livn to fail the step and round-tripping back.
+    if (!back) {
       const validationIssue = validateStep(step, fareSel, answers);
       if (validationIssue) {
         setSubmitting(false);
         setError({ code: 'booking_incomplete', message: validationIssue.message });
-        // Scroll/focus the missing field so the user lands directly on
-        // what needs fixing instead of being jumped to the top of the card.
         if (validationIssue.questionUuid && typeof document !== 'undefined') {
           const el = document.getElementById('q_' + validationIssue.questionUuid);
           if (el) {
@@ -186,12 +188,20 @@ export default function CheckoutPage() {
         }
         return;
       }
+    }
+
+    if (needsPayment) {
+      // ------------------------------------------------------------
+      // Authorize-then-void still leaves a visible auth in the Braintree
+      // dashboard and may briefly tie up the customer's available balance,
+      // so we only charge if the booking side is fully ready (above check).
+      // ------------------------------------------------------------
 
       // The confirm-booking step is sometimes FINAL_QUOTE (simple products)
       // and sometimes TEMPORARY_HOLD (complex products) — the latter has no
       // finalQuote on itself, so scan the whole flow for the latest quote.
       const quote = step.finalQuote || findQuoteInFlow(flow);
-      const charge = resolveChargeAmount(quote, toUsd);
+      const charge = resolveChargeAmount(quote, toUsd, markup);
       if (!charge) {
         // eslint-disable-next-line no-console
         console.warn('[braintree] could not resolve amount. step.finalQuote=', step.finalQuote, ' flow-level quote=', quote);
@@ -488,6 +498,7 @@ export default function CheckoutPage() {
           canPay={canPay}
           onRequestableChange={setCanPay}
           cooldownUntil={cooldownUntil}
+          markup={markup}
         />
       ) : isDone ? (
         <ConfirmedView flow={flow} />
@@ -502,7 +513,7 @@ export default function CheckoutPage() {
   );
 }
 
-function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answers, setAnswers, onNext, onBack, onPreview, submitting, payStatus, error, errorRef, dropinRef, canPay, onRequestableChange, cooldownUntil }) {
+function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answers, setAnswers, onNext, onBack, onPreview, submitting, payStatus, error, errorRef, dropinRef, canPay, onRequestableChange, cooldownUntil, markup = 0 }) {
   const { formatUsd } = useMoney();
   const hasFares = !!step.fareDetails;
   const hasQuestions = !!step.questions?.questionGroups?.length;
@@ -511,7 +522,7 @@ function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answ
   // On TEMPORARY_HOLD steps the finalQuote lives on a previous (DONE) step,
   // so reach back into the flow so the "Authorizing $X" label stays accurate.
   const payableQuote = step.finalQuote || (needsPayment ? findQuoteInFlow(flow) : null);
-  const totalPrice = payableQuote ? pickTotal(payableQuote) : null;
+  const totalPrice = payableQuote ? applyMarkup(pickTotal(payableQuote), markup) : null;
   const totalUsdDisplay = totalPrice ? formatUsd(totalPrice) : null;
 
   // Compute an expiry countdown (if the step has one) AND a Braintree
@@ -569,6 +580,7 @@ function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answ
               onChange={setFareSel}
               addOns={addOnSel}
               onAddOnChange={setAddOnSel}
+              markup={markup}
             />
           </div>
         ) : null}
@@ -598,7 +610,7 @@ function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answ
         {hasQuote ? (
           <div className="mt-4">
             <h3 className="font-semibold mb-2">Quote</h3>
-            <QuoteView quote={step.finalQuote} />
+            <QuoteView quote={step.finalQuote} markup={markup} />
           </div>
         ) : null}
 
@@ -663,21 +675,75 @@ function validateStep(step, fareSel, answers) {
   if (step.fareDetails) {
     const totalQty = Object.values(fareSel || {}).reduce((n, v) => n + Number(v || 0), 0);
     if (totalQty < 1) return { message: 'Please choose at least one ticket before paying.' };
+
+    // Per-fare constraints. Walk the same fareDetails tree the FareSelector
+    // renders. Without these checks Livn returns step.error after submit on
+    // products like Salzburg (twin fare with unitsMultipleOf=2) — better to
+    // catch client-side before we burn a Braintree authorization.
+    const constraintIssue = validateFareConstraints(step.fareDetails, fareSel);
+    if (constraintIssue) return constraintIssue;
   }
   const groups = step.questions?.questionGroups || [];
   for (const g of groups) {
     for (const q of g.questions || []) {
-      if (!q.required) continue;
       const v = answers?.[q.uuid];
       const empty =
         v === undefined || v === null || v === '' ||
         (Array.isArray(v) && v.length === 0);
       if (empty) {
+        if (!q.required) continue;
         const label = q.title || q.question || 'a required field';
         return {
           message: `Please fill in "${label}" before paying.`,
           questionUuid: q.uuid,
         };
+      }
+      // Regex validation runs whether the field is required or not — once
+      // the user has filled it in it must match. Used by Salzburg's frequent
+      // flyer follow-up question and any cert product 4 regex prompt.
+      if (q.regex) {
+        try {
+          const re = new RegExp(q.regex);
+          const stringVal = Array.isArray(v) ? v.join(',') : String(v);
+          if (!re.test(stringVal)) {
+            const label = q.title || q.question || 'this field';
+            return {
+              message: `"${label}" doesn't match the required format (${q.regex}).`,
+              questionUuid: q.uuid,
+            };
+          }
+        } catch (_) {
+          // A malformed regex from the supplier should not block submission.
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// Walk the fareDetails tree and check every selected fare against its own
+// unitsMin / unitsMax / unitsAvailable / unitsMultipleOf. Returns the first
+// failure, or null.
+function validateFareConstraints(fareDetails, fareSel) {
+  const sel = fareSel || {};
+  for (const bv of fareDetails.baseVariants || []) {
+    for (const ts of bv.timeSlots || []) {
+      for (const f of ts.fares || []) {
+        const qty = Number(sel[f.uuid] || 0);
+        if (!qty) continue;
+        const min = Number(f.unitsMin ?? 0);
+        const max = Math.min(Number(f.unitsAvailable ?? 99), Number(f.unitsMax ?? 99));
+        const step = Number(f.unitsMultipleOf ?? 1);
+        const label = f.name || 'this fare';
+        if (qty < min) {
+          return { message: `"${label}" requires at least ${min} units.` };
+        }
+        if (qty > max) {
+          return { message: `"${label}" allows at most ${max} units.` };
+        }
+        if (step > 1 && qty % step !== 0) {
+          return { message: `"${label}" must be booked in multiples of ${step}.` };
+        }
       }
     }
   }
@@ -735,40 +801,49 @@ function findQuoteInFlow(flow) {
  * or the currency isn't in the rates table, we fall back to the raw
  * amount in its native currency so the auth isn't blocked on FX.
  */
-function resolveChargeAmount(quote, toUsd) {
+function resolveChargeAmount(quote, toUsd, markup = 0) {
   if (!quote || typeof quote !== 'object') return null;
-
-  const candidates = [];
-
-  const rootTotal = quote.grossTotal || quote.total || quote.netTotal;
-  if (rootTotal) candidates.push(rootTotal);
 
   const items = Array.isArray(quote.lineItems) ? quote.lineItems
               : Array.isArray(quote.items) ? quote.items : [];
+
+  // Per-line-item markup: only items flagged resSuppliedPriceIsNetRate get
+  // marked up, matching what QuoteView shows the customer. Falls back to
+  // root-total × markup if line items don't add up cleanly.
   if (items.length) {
     let sum = 0;
     let currency = null;
     let ok = true;
     for (const li of items) {
+      const isNet = !!li?.salesComputationDetails?.resSuppliedPriceIsNetRate;
+      const m = isNet ? markup : 0;
       const lineTotal = li.grossTotal || li.totalPrice || li.price;
       if (lineTotal && Number.isFinite(Number(lineTotal.amount))) {
-        sum += Number(lineTotal.amount);
+        sum += Number(lineTotal.amount) * (1 + m);
         currency = currency || lineTotal.currency;
         continue;
       }
       const unit = li.grossPerUnit || li.netPerUnit || li.unitPrice;
       const qty = Number(li.quantity ?? 1);
       if (unit && Number.isFinite(Number(unit.amount)) && Number.isFinite(qty)) {
-        sum += Number(unit.amount) * qty;
+        sum += Number(unit.amount) * qty * (1 + m);
         currency = currency || unit.currency;
         continue;
       }
       ok = false;
       break;
     }
-    if (ok && sum > 0) candidates.push({ amount: sum, currency: currency || 'USD' });
+    if (ok && sum > 0) {
+      const c = { amount: sum, currency: currency || 'USD' };
+      const usd = toUsd(c);
+      if (Number.isFinite(usd) && usd > 0) return { amount: usd.toFixed(2), currency: 'USD' };
+      return { amount: sum.toFixed(2), currency: c.currency };
+    }
   }
 
+  const candidates = [];
+  const rootTotal = quote.grossTotal || quote.total || quote.netTotal;
+  if (rootTotal) candidates.push(rootTotal);
   for (const key of ['finalPrice', 'price', 'amount', 'totalAmount']) {
     const v = quote[key];
     if (v && typeof v === 'object' && Number.isFinite(Number(v.amount))) {
@@ -781,12 +856,11 @@ function resolveChargeAmount(quote, toUsd) {
   for (const c of candidates) {
     const amt = Number(c.amount);
     if (!Number.isFinite(amt) || amt <= 0) continue;
-
     const usd = toUsd(c);
     if (Number.isFinite(usd) && usd > 0) {
-      return { amount: usd.toFixed(2), currency: 'USD' };
+      return { amount: (usd * (1 + markup)).toFixed(2), currency: 'USD' };
     }
-    return { amount: amt.toFixed(2), currency: c.currency || 'USD' };
+    return { amount: (amt * (1 + markup)).toFixed(2), currency: c.currency || 'USD' };
   }
 
   return null;
@@ -825,18 +899,37 @@ function ConfirmedView({ flow }) {
 
           {b.tickets?.length ? (
             <div className="mt-4">
-              <h4 className="font-semibold text-sm mb-2">Tickets</h4>
+              {/* Cert wording: "Make sure the application can handle group
+                  booking tickets and single passenger tickets." We tell the
+                  two apart by ticket count vs party size — one ticket
+                  covering multiple passengers means a group ticket. */}
+              <h4 className="font-semibold text-sm mb-2">
+                Tickets
+                {b.tickets.length === 1 && (b.tickets[0]?.passengerDetails?.length || 0) > 1 ? (
+                  <span className="ml-2 badge bg-slate-100 text-slate-700 text-[10px]">group ticket</span>
+                ) : b.tickets.length > 1 ? (
+                  <span className="ml-2 badge bg-slate-100 text-slate-700 text-[10px]">{b.tickets.length} individual tickets</span>
+                ) : null}
+              </h4>
               <div className="space-y-2">
                 {b.tickets.map((t) => {
                   const paxNames = (t.passengerDetails || []).map((p) => p?.name).filter(Boolean);
                   const prodName = (t.productDetails || [])[0]?.name;
+                  // Some products (cert Product 3) attach barcodes — display
+                  // them inline so the ticket detail is self-contained.
+                  const barcodes = Array.isArray(t.barcodes) ? t.barcodes : (t.barcode ? [t.barcode] : []);
                   return (
                     <div key={t.id} className="flex justify-between items-start border border-slate-200 rounded p-2 text-sm gap-2">
-                      <div className="min-w-0">
+                      <div className="min-w-0 space-y-0.5">
                         <div className="font-medium">
                           Ticket #{t.id}{paxNames.length ? ' — ' + paxNames.join(', ') : ''}
                         </div>
                         {prodName ? <div className="text-xs text-slate-500 truncate">{prodName}</div> : null}
+                        {barcodes.map((bc, i) => (
+                          <div key={i} className="text-xs text-slate-500">
+                            {bc.format || 'Code'}: <span className="font-mono">{bc.content || bc.value}</span>
+                          </div>
+                        ))}
                       </div>
                       <a
                         href={`/api/livn/tickets/${t.id}/pdf`}
@@ -850,6 +943,22 @@ function ConfirmedView({ flow }) {
                   );
                 })}
               </div>
+            </div>
+          ) : null}
+
+          {b.externalResources?.length ? (
+            <div className="mt-4">
+              <h4 className="font-semibold text-sm mb-2">Additional resources</h4>
+              <ul className="list-disc pl-5 text-sm space-y-1">
+                {b.externalResources.map((r, i) => (
+                  <li key={i}>
+                    <a href={r.url} target="_blank" rel="noreferrer" className="text-brand-700 underline">
+                      {r.title || r.type || r.url}
+                    </a>
+                    {r.required ? <span className="badge bg-red-100 text-red-700 ml-2">required</span> : null}
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : null}
 

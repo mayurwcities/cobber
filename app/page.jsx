@@ -89,9 +89,14 @@ export default function Home() {
   async function runLive() {
     setLoading(true);
     setError(null);
+    // The wcities cobber_api wrapper currently rejects every value of `fts`
+    // with the same "Value must begin and end with '" error — even values
+    // that literally do begin and end with a single quote — so server-side
+    // text search is effectively broken. We omit `fts` from the request and
+    // filter the returned products client-side. Other filters (country,
+    // duration) are still honored server-side.
     const body = {
       paging: { resultsPerPage: 48, currentPage: 1 },
-      fts: live.fts || undefined,
       countries: live.country ? [live.country] : undefined,
       durationMin: live.durationMin ? Number(live.durationMin) : undefined,
       durationMax: live.durationMax ? Number(live.durationMax) : undefined,
@@ -107,8 +112,12 @@ export default function Home() {
       return;
     }
     const list = pickList(res.data, 'products');
-    const total = res.data?.paging?.resultsTotal ?? list.length;
-    setProducts(list);
+    const filtered = filterByText(list, live.fts);
+    const serverTotal = res.data?.paging?.resultsTotal ?? list.length;
+    // When a search term is in play, "total" should reflect what the user
+    // actually sees, not the unfiltered server count.
+    const total = live.fts?.trim() ? filtered.length : serverTotal;
+    setProducts(filtered);
     setMeta({ total, searchId: res.data?.id, live: true });
   }
 
@@ -376,6 +385,27 @@ function Field({ label, children, className = '' }) {
       {children}
     </div>
   );
+}
+
+// Case-insensitive substring match across the fields the user is most likely
+// to be searching for. Used as the client-side fallback while the wrapper's
+// fts endpoint is broken (always returns "Value must begin and end with '"
+// regardless of input). Tokenizes the query so "hot air" matches whether the
+// product hits "hot air balloon" or "Hot-Air Adventure".
+function filterByText(products, raw) {
+  const q = (raw || '').trim().toLowerCase();
+  if (!q) return products;
+  const tokens = q.split(/\s+/).filter(Boolean);
+  return products.filter((p) => {
+    const hay = [
+      p?.name,
+      p?.description,
+      p?.supplier?.name,
+      ...(p?.locationsStart || []).map((l) => l?.city),
+      ...(p?.categories || []).map((c) => (typeof c === 'string' ? c : c?.name)),
+    ].filter(Boolean).join(' ').toLowerCase();
+    return tokens.every((t) => hay.includes(t));
+  });
 }
 
 function SearchIcon() {
