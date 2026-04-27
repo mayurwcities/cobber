@@ -62,16 +62,43 @@ function maskIsoDate(raw) {
   return digits.slice(0, 4) + '-' + digits.slice(4, 6) + '-' + digits.slice(6);
 }
 
+// Today's date as yyyy-MM-dd in the browser's local time zone — used as
+// the upper bound for DOB questions.
+export function todayIso() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// Is this DATE question asking for a date of birth? Livn marks them with a
+// purpose of PAX_DOB / CUSTOMER_DOB etc.; we also catch title/purpose strings
+// containing "birth" as a backstop in case the supplier uses a custom code.
+export function isDobQuestion(q) {
+  if (!q) return false;
+  if (String(q.answerType || '').toUpperCase() !== 'DATE') return false;
+  const purpose = String(q.purpose || '').toUpperCase();
+  if (/DOB\b|BIRTH/.test(purpose)) return true;
+  const title = String(q.title || '').toLowerCase();
+  return /\bbirth\b|date of birth|dob\b/.test(title);
+}
+
 // DOB / date question control. Shows a text input with a yyyy-MM-dd
 // placeholder so what the user sees matches Livn's instruction, plus a
 // calendar icon button on the right that fires showPicker() on a hidden
 // native <input type="date"> so users still get the click-to-pick UX.
-function DateField({ q, value, onChange, common }) {
+// `maxDate` (yyyy-MM-dd) caps the picker — used to prevent picking future
+// dates on DOB questions.
+function DateField({ q, value, onChange, common, maxDate }) {
   const pickerRef = useRef(null);
   const isIso = /^\d{4}-\d{2}-\d{2}$/.test(value || '');
   const placeholder = q.example && /^\d{4}-\d{2}-\d{2}$/.test(q.example)
     ? q.example
     : 'yyyy-MM-dd';
+  // If the user typed a future date past our maxDate, mark the field invalid
+  // visually even before submit so they catch it immediately.
+  const exceedsMax = !!(maxDate && isIso && value > maxDate);
   function openPicker() {
     const el = pickerRef.current;
     if (!el) return;
@@ -82,38 +109,49 @@ function DateField({ q, value, onChange, common }) {
     el.click();
   }
   return (
-    <div className="relative">
-      <input
-        {...common}
-        type="text"
-        inputMode="numeric"
-        placeholder={placeholder}
-        maxLength={10}
-        value={value ?? ''}
-        onChange={(e) => onChange(maskIsoDate(e.target.value))}
-        required={!!q.required}
-        className={(common.className || 'input') + ' pr-10'}
-      />
-      {/* Hidden native date input — drives the calendar popup. Kept in sync
-          with the visible text input so picking from the calendar fills in
-          the field with a proper yyyy-MM-dd value. */}
-      <input
-        ref={pickerRef}
-        type="date"
-        tabIndex={-1}
-        aria-hidden
-        value={isIso ? value : ''}
-        onChange={(e) => onChange(e.target.value)}
-        className="sr-only"
-      />
-      <button
-        type="button"
-        onClick={openPicker}
-        aria-label="Open calendar"
-        className="absolute inset-y-0 right-0 flex items-center px-3 text-slate-400 hover:text-brand-700"
-      >
-        <CalendarIcon />
-      </button>
+    <div className="space-y-1">
+      <div className="relative">
+        <input
+          {...common}
+          type="text"
+          inputMode="numeric"
+          placeholder={placeholder}
+          maxLength={10}
+          value={value ?? ''}
+          onChange={(e) => onChange(maskIsoDate(e.target.value))}
+          required={!!q.required}
+          aria-invalid={exceedsMax || undefined}
+          className={
+            (common.className || 'input') + ' pr-10 ' +
+            (exceedsMax ? 'ring-2 ring-red-400 focus:ring-red-500' : '')
+          }
+        />
+        {/* Hidden native date input — drives the calendar popup. Kept in sync
+            with the visible text input so picking from the calendar fills in
+            the field with a proper yyyy-MM-dd value. The `max` attribute
+            disables future dates in the calendar UI for DOB questions. */}
+        <input
+          ref={pickerRef}
+          type="date"
+          tabIndex={-1}
+          aria-hidden
+          max={maxDate}
+          value={isIso ? value : ''}
+          onChange={(e) => onChange(e.target.value)}
+          className="sr-only"
+        />
+        <button
+          type="button"
+          onClick={openPicker}
+          aria-label="Open calendar"
+          className="absolute inset-y-0 right-0 flex items-center px-3 text-slate-400 hover:text-brand-700"
+        >
+          <CalendarIcon />
+        </button>
+      </div>
+      {exceedsMax ? (
+        <p className="text-xs text-red-600">Date can't be in the future.</p>
+      ) : null}
     </div>
   );
 }
@@ -327,7 +365,17 @@ export default function QuestionRenderer({ question, value, onChange, answers, s
       // placeholder (dd/mm/yyyy on AU/UK, mm/dd/yyyy on US). DateField gives
       // us both: a text input with an explicit yyyy-MM-dd placeholder for
       // typing AND a calendar icon button that opens the native picker.
-      control = <DateField q={q} value={value} onChange={onChange} common={common} />;
+      // DOB-purpose questions get a max=today cap so future dates can't
+      // be selected from the calendar; validateStep mirrors the same rule.
+      control = (
+        <DateField
+          q={q}
+          value={value}
+          onChange={onChange}
+          common={common}
+          maxDate={isDobQuestion(q) ? todayIso() : undefined}
+        />
+      );
       break;
     case 'TIME':
       control = (

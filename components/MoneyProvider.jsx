@@ -52,8 +52,10 @@ const MoneyContext = createContext({
   rates: null,
   targetCurrency: DEFAULT_DISPLAY_CURRENCY,
   preferredDisplayCurrency: DEFAULT_DISPLAY_CURRENCY,
+  bookingCurrency: null,
   setTargetCurrency: () => {},
   setPreferredDisplayCurrency: () => {},
+  setBookingCurrency: () => {},
   toUsd: () => null,
   formatUsd: () => '',
   formatUsdText: (s) => s,
@@ -66,6 +68,12 @@ export function MoneyProvider({ children }) {
   // for the duration of a flow but reads this back when it unmounts.
   const [preferredDisplayCurrency, setPreferredDisplayCurrencyState] = useState(DEFAULT_DISPLAY_CURRENCY);
   const [targetCurrency, setTargetCurrencyState] = useState(DEFAULT_DISPLAY_CURRENCY);
+  // The currency Livn settles the booking in. Set by CheckoutPage from
+  // flow.currency on mount, cleared on unmount. Bare-number prose like
+  // "Transfer fee: 12.0" arrives without a currency code — Livn ships it
+  // implicitly in the booking currency, so formatFeeText needs this to
+  // convert correctly into the active target currency.
+  const [bookingCurrency, setBookingCurrencyState] = useState(null);
   // Hydrate the user's preferred display currency from localStorage once the
   // component mounts (avoids SSR mismatch — server always renders the default).
   useEffect(() => {
@@ -135,6 +143,11 @@ export function MoneyProvider({ children }) {
     }
   }, []);
 
+  // Set by CheckoutPage from flow.currency. Pass null to clear (on unmount).
+  const setBookingCurrency = useCallback((code) => {
+    setBookingCurrencyState(code ? String(code).toUpperCase() : null);
+  }, []);
+
   // Convert any price into the configured target currency. Renamed-internally
   // formerly known as toUsd; we keep the toUsd export so existing callers
   // continue to compile. Returns null when we can't convert (rates missing
@@ -183,10 +196,11 @@ export function MoneyProvider({ children }) {
 
   // Livn pickup-option fees come back as bare-number prose like
   // "Transfer fee: 12.0" with no currency code or symbol — the supplier
-  // assumes you know it's the booking currency. Prepend the active symbol
-  // so users actually see "Transfer fee: AU$12" / "Transfer fee: €12" etc.
-  // Skips strings without a number, things already paired with a currency
-  // symbol/code, and percentages / units like "5% discount" or "30 mins".
+  // implicitly bills it in the booking currency. We treat the bare number
+  // as bookingCurrency, FX-convert into the active targetCurrency, and
+  // prepend the target's symbol. Without that conversion an AUD fee would
+  // get mislabelled as "US$12" when the actual USD value is ~8.60, which
+  // disagrees with the Final Quote line item that does convert correctly.
   const formatFeeText = useCallback((text) => {
     if (text == null || text === '') return text;
     const s = String(text);
@@ -196,8 +210,16 @@ export function MoneyProvider({ children }) {
     if (/^\s*(%|percent|off\b|discount\b|years?\b|hours?\b|min(?:ute)?s?\b|days?\b|km\b|meters?\b|metres?\b|miles?\b|kg\b|cm\b|lb\b)/i.test(m[3])) return s;
     const num = Number(m[2].replace(',', '.'));
     if (!Number.isFinite(num)) return s;
-    return m[1] + (symbol ? symbol + formatNumber(num) : targetCurrency + ' ' + formatNumber(num)) + m[3];
-  }, [symbol, targetCurrency]);
+    // Convert the bare number from the booking currency into the active
+    // target currency. Falls back to no-conversion when bookingCurrency
+    // isn't set (e.g. catalog pages outside checkout) or rates are missing.
+    let displayNum = num;
+    const src = (bookingCurrency || targetCurrency).toUpperCase();
+    if (src !== targetCurrency && rates && rates[src] && rates[src][targetCurrency]) {
+      displayNum = num * rates[src][targetCurrency];
+    }
+    return m[1] + (symbol ? symbol + formatNumber(displayNum) : targetCurrency + ' ' + formatNumber(displayNum)) + m[3];
+  }, [symbol, targetCurrency, bookingCurrency, rates]);
 
   // Compact form for tight UI like the calendar date cells: "A$574" or
   // "€1.2k". Skips decimals; collapses thousands so the price fits in a tile.
@@ -241,14 +263,16 @@ export function MoneyProvider({ children }) {
     error,
     targetCurrency,
     preferredDisplayCurrency,
+    bookingCurrency,
     setTargetCurrency,
     setPreferredDisplayCurrency,
+    setBookingCurrency,
     toUsd,
     formatUsd,
     formatUsdText,
     formatFeeText,
     formatPriceCompact,
-  }), [rates, error, targetCurrency, preferredDisplayCurrency, setTargetCurrency, setPreferredDisplayCurrency, toUsd, formatUsd, formatUsdText, formatFeeText, formatPriceCompact]);
+  }), [rates, error, targetCurrency, preferredDisplayCurrency, bookingCurrency, setTargetCurrency, setPreferredDisplayCurrency, setBookingCurrency, toUsd, formatUsd, formatUsdText, formatFeeText, formatPriceCompact]);
 
   return <MoneyContext.Provider value={value}>{children}</MoneyContext.Provider>;
 }

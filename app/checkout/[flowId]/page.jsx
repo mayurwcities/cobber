@@ -8,14 +8,14 @@ import { useMoney } from '@/components/MoneyProvider';
 import { Loading, ErrorBox } from '@/components/States';
 import FlowStepper from '@/components/FlowStepper';
 import FareSelector from '@/components/FareSelector';
-import QuestionRenderer, { questionNumericBounds, walkActiveQuestions } from '@/components/QuestionRenderer';
+import QuestionRenderer, { questionNumericBounds, walkActiveQuestions, isDobQuestion, todayIso } from '@/components/QuestionRenderer';
 import QuoteView from '@/components/QuoteView';
 import BraintreeDropIn from '@/components/BraintreeDropIn';
 
 export default function CheckoutPage() {
   const { flowId } = useParams();
   const router = useRouter();
-  const { formatUsd, toUsd } = useMoney();
+  const { formatUsd, toUsd, setBookingCurrency } = useMoney();
 
   const [flow, setFlow] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -89,6 +89,15 @@ export default function CheckoutPage() {
   // handles the conversion. The Braintree authorize amount is computed via
   // toUsd() separately, so the actual card charge is always USD-equivalent
   // regardless of what's shown.
+  //
+  // We DO publish flow.currency as the active "booking currency" though,
+  // so MoneyProvider.formatFeeText knows that bare-number prose like
+  // "Transfer fee: 12.0" on pickup options is implicitly in flow.currency
+  // and converts correctly into the user's display target.
+  useEffect(() => {
+    if (flow?.currency) setBookingCurrency(flow.currency);
+    return () => setBookingCurrency(null);
+  }, [flow?.currency, setBookingCurrency]);
 
   // Livn returns steps newest-first, so we can't look at steps[length - 1].
   // A flow is "done" when a CONFIRMED_BOOKING step exists AND is DONE,
@@ -903,6 +912,15 @@ function validateOneQuestion(q, answers) {
       if (hi != null && num > hi) {
         return { message: `"${label}" can't be more than ${hi}.`, questionUuid: q.uuid };
       }
+    }
+  }
+  // Date-of-birth questions can't be in the future. The DateField renderer
+  // already caps the calendar picker via max=today, but a manually-typed
+  // value can still slip past — block it here before submit.
+  if (t === 'DATE' && isDobQuestion(q) && /^\d{4}-\d{2}-\d{2}$/.test(String(v))) {
+    if (String(v) > todayIso()) {
+      const label = q.title || q.question || 'Date of birth';
+      return { message: `"${label}" can't be in the future.`, questionUuid: q.uuid };
     }
   }
   return null;
