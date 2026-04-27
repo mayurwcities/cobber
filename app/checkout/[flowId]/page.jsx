@@ -1080,8 +1080,7 @@ function ConfirmedView({ flow }) {
               <span className="font-semibold text-lg">Booking confirmed</span>
             </div>
             <div className="text-sm text-emerald-800 mt-2">
-              A confirmation has been sent to your email. Save this page or
-              your PDF voucher in case you need it on the day.
+              Download your PDF voucher below and keep it handy — you'll need it on the day of the tour.
             </div>
             <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-sm">
               <span>
