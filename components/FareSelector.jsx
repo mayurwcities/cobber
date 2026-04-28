@@ -6,10 +6,30 @@ import QtyStepper from '@/components/QtyStepper';
 // selections is { [uuid]: quantity }
 // addOns is { [uuid]: quantity }
 
-export default function FareSelector({ fareDetails, selections, onChange, addOns, onAddOnChange, markup = 0 }) {
+export default function FareSelector({ fareDetails, selections, onChange, addOns, onAddOnChange, markup = 0, paxCap = null }) {
   const { formatUsd } = useMoney();
   if (!fareDetails) return null;
   const baseVariants = fareDetails.baseVariants || [];
+  // Sum of fare quantities across every variant/timeslot. Used to:
+  //   - Cap each FareRow's "+" so total can't exceed paxCap.
+  //   - Show "N of M travellers selected" progress when paxCap is set.
+  const totalSelected = Object.values(selections || {}).reduce(
+    (n, v) => n + Number(v || 0), 0
+  );
+  const remainingCap = paxCap != null ? Math.max(0, paxCap - totalSelected) : null;
+
+  // The user can only pick from ONE base variant in a single booking
+  // (Livn rejects multi-variant submits). "Picking" includes any of:
+  //   - a fare quantity > 0
+  //   - a variant-level add-on quantity > 0 (e.g. "Exclusive package")
+  //   - a time-slot-level add-on quantity > 0 (e.g. "Photo + Video")
+  //   - a per-fare add-on quantity > 0 (only reachable when a fare is
+  //     already selected, but checked for completeness)
+  // Identify the active variant by array index because Livn returns
+  // baseVariants without a uuid; only the inner fares carry one.
+  const activeVariantIndex = baseVariants.findIndex((bv) =>
+    variantHasAnySelection(bv, selections, addOns)
+  );
 
   function setQty(uuid, qty) {
     // Use functional updater to avoid stale-closure loss when multiple
@@ -35,6 +55,10 @@ export default function FareSelector({ fareDetails, selections, onChange, addOns
 
   return (
     <div className="space-y-8">
+      {paxCap != null ? (
+        <PaxProgressBanner total={totalSelected} cap={paxCap} />
+      ) : null}
+
       {baseVariants.map((bv, bi) => (
         <VariantBlock
           key={bv.uuid || bi}
@@ -45,6 +69,8 @@ export default function FareSelector({ fareDetails, selections, onChange, addOns
           setQty={setQty}
           setAddOnQty={setAddOnQty}
           markup={markup}
+          remainingCap={remainingCap}
+          locked={activeVariantIndex !== -1 && bi !== activeVariantIndex}
         />
       ))}
 
@@ -58,12 +84,57 @@ export default function FareSelector({ fareDetails, selections, onChange, addOns
   );
 }
 
-function VariantBlock({ variant: bv, index, selections, addOns, setQty, setAddOnQty, markup }) {
+// Tally banner shown above the variant cards when the flow had a PAX_COUNT
+// gate. Switches color from amber (incomplete) to emerald (complete) so the
+// user can see at a glance whether they've assigned everyone to a fare.
+function PaxProgressBanner({ total, cap }) {
+  const complete = total === cap;
+  const over = total > cap;
+  const tone = complete
+    ? 'bg-emerald-50 ring-emerald-200 text-emerald-800'
+    : over
+    ? 'bg-red-50 ring-red-200 text-red-800'
+    : 'bg-amber-50 ring-amber-200 text-amber-900';
+  const msg = complete
+    ? 'All travellers assigned to fares — ready to continue.'
+    : over
+    ? `You picked ${total} fares but only said ${cap} traveller${cap === 1 ? '' : 's'}. Reduce a quantity.`
+    : `Pick fares for ${cap - total} more traveller${(cap - total) === 1 ? '' : 's'} (${total} of ${cap} assigned).`;
+  return (
+    <div className={'flex items-center justify-between gap-3 rounded-lg ring-1 px-4 py-3 ' + tone}>
+      <div className="text-sm font-medium">{msg}</div>
+      <div className="text-sm font-bold tabular-nums shrink-0">
+        {total} / {cap}
+      </div>
+    </div>
+  );
+}
+
+function VariantBlock({ variant: bv, index, selections, addOns, setQty, setAddOnQty, markup, remainingCap, locked = false }) {
   const timeSlots = bv.timeSlots || [];
   const unavailable = bv.available === false;
+  const dimmed = locked || unavailable;
+
+  // Same one-active-at-a-time rule as variants, applied per timeslot inside
+  // this variant. If the user picked the 06:00 slot, the 10:00 slot in the
+  // same variant should lock until they clear those selections — Livn won't
+  // accept a fare-selection that spans two time slots either. Includes
+  // time-slot add-ons too, so picking just "Photo + Video" without a fare
+  // also commits the user to that slot.
+  const activeTsIndex = timeSlots.findIndex((ts) =>
+    timeSlotHasAnySelection(ts, selections, addOns)
+  );
 
   return (
-    <section className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+    <section
+      aria-disabled={dimmed || undefined}
+      className={
+        'rounded-xl border bg-white shadow-sm overflow-hidden transition ' +
+        (dimmed
+          ? 'border-slate-200 opacity-60 grayscale-[0.2]'
+          : 'border-slate-200')
+      }
+    >
       <header className="px-5 py-4 bg-gradient-to-r from-brand-50 to-white border-b border-slate-200">
         <div className="flex justify-between items-start gap-3">
           <div className="min-w-0">
@@ -76,12 +147,22 @@ function VariantBlock({ variant: bv, index, selections, addOns, setQty, setAddOn
           </div>
           {unavailable ? (
             <span className="badge bg-red-100 text-red-700 shrink-0">Unavailable</span>
+          ) : locked ? (
+            <span className="badge bg-slate-200 text-slate-700 shrink-0">Locked</span>
           ) : null}
         </div>
         {bv.description ? (
           <p className="text-sm text-slate-600 mt-2">{bv.description}</p>
         ) : null}
       </header>
+
+      {locked ? (
+        <div className="px-5 py-3 bg-amber-50 border-b border-amber-100 text-xs text-amber-900">
+          You've selected fares from another option above. Clear those
+          selections first to choose from this one — only one option can be
+          booked at a time.
+        </div>
+      ) : null}
 
       <div className="p-5 space-y-6">
         <ExtrasSection
@@ -90,6 +171,7 @@ function VariantBlock({ variant: bv, index, selections, addOns, setQty, setAddOn
           selections={addOns}
           onChange={setAddOnQty}
           markup={markup}
+          disabled={locked}
         />
 
         <div>
@@ -107,6 +189,13 @@ function VariantBlock({ variant: bv, index, selections, addOns, setQty, setAddOn
                 setQty={setQty}
                 setAddOnQty={setAddOnQty}
                 markup={markup}
+                remainingCap={remainingCap}
+                // A timeslot is locked when either the parent variant is
+                // locked OR another timeslot in the same variant has the
+                // active selection. The latter only kicks in for products
+                // that ship multiple timeslots per variant (e.g. Product 1's
+                // 06:00 vs 10:00 within "Standard Tour with Transfer").
+                locked={locked || (activeTsIndex !== -1 && ti !== activeTsIndex)}
               />
             ))}
           </div>
@@ -116,12 +205,19 @@ function VariantBlock({ variant: bv, index, selections, addOns, setQty, setAddOn
   );
 }
 
-function TimeSlotBlock({ slot: ts, index, selections, addOns, setQty, setAddOnQty, markup }) {
+function TimeSlotBlock({ slot: ts, index, selections, addOns, setQty, setAddOnQty, markup, remainingCap, locked = false }) {
   const fares = ts.fares || [];
   const unavailable = ts.available === false;
+  const dimmed = locked || unavailable;
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-slate-50/40">
+    <div
+      aria-disabled={dimmed || undefined}
+      className={
+        'rounded-lg border bg-slate-50/40 transition ' +
+        (dimmed ? 'border-slate-200 opacity-60' : 'border-slate-200')
+      }
+    >
       <div className="flex justify-between items-center px-4 py-3 border-b border-slate-200 bg-white rounded-t-lg">
         <div className="flex items-center gap-2">
           <ClockIcon />
@@ -129,8 +225,18 @@ function TimeSlotBlock({ slot: ts, index, selections, addOns, setQty, setAddOnQt
             {ts.name || ts.timeSlot || `Time slot ${index + 1}`}
           </span>
         </div>
-        {unavailable ? <span className="badge bg-red-100 text-red-700">Unavailable</span> : null}
+        {unavailable ? (
+          <span className="badge bg-red-100 text-red-700">Unavailable</span>
+        ) : locked ? (
+          <span className="badge bg-slate-200 text-slate-700">Locked</span>
+        ) : null}
       </div>
+
+      {locked ? (
+        <div className="px-4 py-2.5 bg-amber-50 border-b border-amber-100 text-xs text-amber-900">
+          Another time slot is currently selected. Clear it to choose this one instead.
+        </div>
+      ) : null}
 
       <div className="p-4 space-y-5">
         <ExtrasSection
@@ -140,6 +246,7 @@ function TimeSlotBlock({ slot: ts, index, selections, addOns, setQty, setAddOnQt
           onChange={setAddOnQty}
           markup={markup}
           tone="white"
+          disabled={locked}
         />
 
         <div>
@@ -158,6 +265,8 @@ function TimeSlotBlock({ slot: ts, index, selections, addOns, setQty, setAddOnQt
                 addOns={addOns}
                 onAddOnQty={setAddOnQty}
                 markup={markup}
+                remainingCap={remainingCap}
+                locked={locked}
               />
             ))}
           </div>
@@ -167,14 +276,25 @@ function TimeSlotBlock({ slot: ts, index, selections, addOns, setQty, setAddOnQt
   );
 }
 
-function FareRow({ fare, qty, onQty, addOns, onAddOnQty, markup = 0 }) {
+function FareRow({ fare, qty, onQty, addOns, onAddOnQty, markup = 0, remainingCap = null, locked = false }) {
   const { formatUsd, formatUsdText } = useMoney();
   // Honor every constraint Livn may send:
   // - unitsAvailable (supplier stock)
   // - unitsMin        (floor per booking)
   // - unitsMax        (ceiling per booking)
   // - unitsMultipleOf (e.g. twin rooms must be in pairs)
-  const max = Math.min(fare.unitsAvailable ?? 99, fare.unitsMax ?? 99);
+  // Plus the cross-fare PAX_COUNT cap when present: this fare can grow up to
+  // its current qty + whatever's left of the cap. When remainingCap is 0
+  // (cap reached), max collapses to qty so "+" disables — until the user
+  // decreases another fare and frees up a slot.
+  // And the cross-variant lock: when another variant has selections, every
+  // fare here pegs at qty (which is 0 for unselected variants), preventing
+  // any + click — only one variant can have selections at a time.
+  let max = Math.min(fare.unitsAvailable ?? 99, fare.unitsMax ?? 99);
+  if (remainingCap != null) {
+    max = Math.min(max, qty + Math.max(0, remainingCap));
+  }
+  if (locked) max = qty;
   const min = fare.unitsMin ?? 0;
   const step = fare.unitsMultipleOf ?? 1;
 
@@ -292,7 +412,7 @@ function FareRow({ fare, qty, onQty, addOns, onAddOnQty, markup = 0 }) {
 // Reusable add-on group shown at variant or time-slot level. Wraps the rows
 // in a clearly labelled card so users see WHICH context the add-ons apply to
 // (cert product 1 has add-ons at three different levels — easy to confuse).
-function ExtrasSection({ label, addOns, selections, onChange, markup = 0, tone = 'tinted' }) {
+function ExtrasSection({ label, addOns, selections, onChange, markup = 0, tone = 'tinted', disabled = false }) {
   const { formatUsd } = useMoney();
   if (!Array.isArray(addOns) || addOns.length === 0) return null;
   return (
@@ -305,7 +425,9 @@ function ExtrasSection({ label, addOns, selections, onChange, markup = 0, tone =
       }>
         {addOns.map((a) => {
           const qty = (selections || {})[a.uuid] || 0;
-          const max = a.unitsAvailable ?? 99;
+          // When the parent variant is locked, peg max to qty (which is 0
+          // for an inactive variant) so the "+" can't fire.
+          const max = disabled ? qty : (a.unitsAvailable ?? 99);
           return (
             <div key={a.uuid} className="flex items-start justify-between gap-3 px-3 py-2.5">
               <div className="min-w-0 text-sm flex-1">
@@ -343,6 +465,24 @@ function SectionLabel({ children, small }) {
       {children}
     </div>
   );
+}
+
+// Does this time slot have ANY user selection — a fare with qty>0, a
+// timeslot-level add-on, or a per-fare nested add-on? Used by both the
+// variant-level lock (rolling up) and the per-timeslot lock (direct).
+function timeSlotHasAnySelection(ts, selections, addOnSelections) {
+  if ((ts?.addOns || []).some((a) => (addOnSelections?.[a.uuid] || 0) > 0)) return true;
+  return (ts?.fares || []).some((f) => {
+    if ((selections?.[f.uuid] || 0) > 0) return true;
+    return (f.addOns || []).some((a) => (addOnSelections?.[a.uuid] || 0) > 0);
+  });
+}
+
+// Same rollup, one level up — variant-level add-ons OR anything inside
+// any of its time slots.
+function variantHasAnySelection(bv, selections, addOnSelections) {
+  if ((bv?.addOns || []).some((a) => (addOnSelections?.[a.uuid] || 0) > 0)) return true;
+  return (bv?.timeSlots || []).some((ts) => timeSlotHasAnySelection(ts, selections, addOnSelections));
 }
 
 // Net-rate products carry a supplier price that the merchant marks up before

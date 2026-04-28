@@ -99,6 +99,13 @@ export default function CheckoutPage() {
     return () => setBookingCurrency(null);
   }, [flow?.currency, setBookingCurrency]);
 
+  // Salzburg-style products ask "how many passengers?" before fare selection.
+  // Once that's answered, the FARE_SELECTION step needs to honour that count
+  // — total fares (Adult + Child + Infant + …) shouldn't be allowed to
+  // exceed the chosen number. Pull the answer off the DONE PAX_COUNT step
+  // here so we can pass it through to FareSelector.
+  const paxCap = useMemo(() => findPaxCount(flow), [flow]);
+
   // Livn returns steps newest-first, so we can't look at steps[length - 1].
   // A flow is "done" when a CONFIRMED_BOOKING step exists AND is DONE,
   // or when there are already booking records attached to the flow.
@@ -210,7 +217,7 @@ export default function CheckoutPage() {
     // produce an inline error before we even hit the server, instead of
     // waiting for Livn to fail the step and round-tripping back.
     if (!back) {
-      const validationIssue = validateStep(step, fareSel, answers);
+      const validationIssue = validateStep(step, fareSel, answers, paxCap);
       if (validationIssue) {
         setSubmitting(false);
         setError({ code: 'booking_incomplete', message: validationIssue.message });
@@ -534,6 +541,7 @@ export default function CheckoutPage() {
           onRequestableChange={setCanPay}
           cooldownUntil={cooldownUntil}
           markup={markup}
+          paxCap={paxCap}
         />
       ) : isDone ? (
         <ConfirmedView flow={flow} />
@@ -548,7 +556,7 @@ export default function CheckoutPage() {
   );
 }
 
-function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answers, setAnswers, onNext, onBack, onPreview, submitting, payStatus, error, errorRef, dropinRef, canPay, onRequestableChange, cooldownUntil, markup = 0 }) {
+function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answers, setAnswers, onNext, onBack, onPreview, submitting, payStatus, error, errorRef, dropinRef, canPay, onRequestableChange, cooldownUntil, markup = 0, paxCap = null }) {
   const { formatUsd } = useMoney();
   const hasFares = !!step.fareDetails;
   const hasQuestions = !!step.questions?.questionGroups?.length;
@@ -650,6 +658,7 @@ function StepView({ step, flow, fareSel, setFareSel, addOnSel, setAddOnSel, answ
             addOns={addOnSel}
             onAddOnChange={setAddOnSel}
             markup={markup}
+            paxCap={paxCap}
           />
         </SectionCard>
       ) : null}
@@ -835,7 +844,7 @@ function SectionCard({ eyebrow, title, subtitle, children }) {
  * Runs BEFORE we hit Braintree so an incomplete form never creates an
  * authorization in the first place.
  */
-function validateStep(step, fareSel, answers) {
+function validateStep(step, fareSel, answers, paxCap = null) {
   if (step.fareDetails) {
     const totalQty = Object.values(fareSel || {}).reduce((n, v) => n + Number(v || 0), 0);
     if (totalQty < 1) return { message: 'Please choose at least one ticket before paying.' };
@@ -846,6 +855,18 @@ function validateStep(step, fareSel, answers) {
     // catch client-side before we burn a Braintree authorization.
     const constraintIssue = validateFareConstraints(step.fareDetails, fareSel);
     if (constraintIssue) return constraintIssue;
+
+    // PAX_COUNT cap. Salzburg-style products ask the user up front how many
+    // travellers they have; the sum of selected fares must equal that number,
+    // not just stay below it (Livn rejects an under-count too).
+    if (paxCap != null && Number.isFinite(paxCap)) {
+      if (totalQty > paxCap) {
+        return { message: `You said you're travelling with ${paxCap} ${paxCap === 1 ? 'person' : 'people'}, but selected ${totalQty} fares. Adjust the quantities to match.` };
+      }
+      if (totalQty < paxCap) {
+        return { message: `You said you're travelling with ${paxCap} ${paxCap === 1 ? 'person' : 'people'}, but only ${totalQty} ${totalQty === 1 ? 'is' : 'are'} selected. Pick fares for everyone before continuing.` };
+      }
+    }
   }
   const groups = step.questions?.questionGroups || [];
   for (const g of groups) {
@@ -922,6 +943,22 @@ function validateOneQuestion(q, answers) {
       const label = q.title || q.question || 'Date of birth';
       return { message: `"${label}" can't be in the future.`, questionUuid: q.uuid };
     }
+  }
+  return null;
+}
+
+// Salzburg-style products gate FARE_SELECTION on a pre-step asking how many
+// travellers there are (stepName === 'PAX_COUNT'). Read its answer off the
+// flow so we can cap fare-quantity steppers and validate the totals match.
+// Returns an integer or null if no PAX_COUNT step has been answered yet.
+function findPaxCount(flow) {
+  for (const s of flow?.steps || []) {
+    if (s?.stepName !== 'PAX_COUNT') continue;
+    if (s.status !== 'DONE') continue;
+    const ans = s.answers?.answers?.[0];
+    if (!ans) continue;
+    const n = Number(ans.value);
+    if (Number.isFinite(n) && n > 0) return n;
   }
   return null;
 }
