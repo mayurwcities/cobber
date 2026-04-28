@@ -15,7 +15,7 @@ import BraintreeDropIn from '@/components/BraintreeDropIn';
 export default function CheckoutPage() {
   const { flowId } = useParams();
   const router = useRouter();
-  const { formatUsd, toUsd, setBookingCurrency } = useMoney();
+  const { formatUsd, toUsd, setBookingCurrency, setBookingMarkup } = useMoney();
 
   const [flow, setFlow] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -98,6 +98,15 @@ export default function CheckoutPage() {
     if (flow?.currency) setBookingCurrency(flow.currency);
     return () => setBookingCurrency(null);
   }, [flow?.currency, setBookingCurrency]);
+
+  // Same idea for the net-rate markup. Pickup-option feeDescription strings
+  // come back as bare numbers (no currency, no markup) — the user-visible
+  // line item gets marked up in QuoteView, so the dropdown needs to match.
+  // Publishing the markup here lets formatFeeText apply it consistently.
+  useEffect(() => {
+    setBookingMarkup(markup);
+    return () => setBookingMarkup(0);
+  }, [markup, setBookingMarkup]);
 
   // Salzburg-style products ask "how many passengers?" before fare selection.
   // Once that's answered, the FARE_SELECTION step needs to honour that count

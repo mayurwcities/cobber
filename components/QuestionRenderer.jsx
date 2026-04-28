@@ -468,15 +468,26 @@ export default function QuestionRenderer({ question, value, onChange, answers, s
     }
     case 'DECIMAL':
     case 'FLOAT':
+      // Floor at 0 — height/weight/etc. can't be negative, and Livn doesn't
+      // ship explicit bounds for these on Product 3 (per their decision we
+      // don't invent them, but blocking negatives is harmless and prevents
+      // the native input arrow from sliding past zero).
       control = (
         <input
           {...common}
           type="number"
           step="0.01"
+          min={0}
           inputMode="decimal"
           placeholder={q.example || ''}
           value={value ?? ''}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            const raw = e.target.value;
+            if (raw === '' || raw === '-') { onChange(''); return; }
+            const n = Number(raw);
+            if (!Number.isFinite(n)) { onChange(raw); return; }
+            onChange(String(Math.max(0, n)));
+          }}
           required={!!q.required}
         />
       );

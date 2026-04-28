@@ -74,6 +74,12 @@ export function MoneyProvider({ children }) {
   // implicitly in the booking currency, so formatFeeText needs this to
   // convert correctly into the active target currency.
   const [bookingCurrency, setBookingCurrencyState] = useState(null);
+  // Net-rate markup fraction (e.g. 0.20 for 20%) for the active flow.
+  // Mirrors what CheckoutPage applies to fare prices and the Braintree
+  // authorize amount, so feeDescription numbers shown on pickup options
+  // get marked up the same way the quote line items do — otherwise the
+  // option label would understate the fee by 20%.
+  const [bookingMarkup, setBookingMarkupState] = useState(0);
   // Hydrate the user's preferred display currency from localStorage once the
   // component mounts (avoids SSR mismatch — server always renders the default).
   useEffect(() => {
@@ -148,6 +154,12 @@ export function MoneyProvider({ children }) {
     setBookingCurrencyState(code ? String(code).toUpperCase() : null);
   }, []);
 
+  // Set by CheckoutPage from getProductMarkup(flow.product). Pass 0 to clear.
+  const setBookingMarkup = useCallback((m) => {
+    const n = Number(m);
+    setBookingMarkupState(Number.isFinite(n) && n > 0 ? n : 0);
+  }, []);
+
   // Convert any price into the configured target currency. Renamed-internally
   // formerly known as toUsd; we keep the toUsd export so existing callers
   // continue to compile. Returns null when we can't convert (rates missing
@@ -197,10 +209,9 @@ export function MoneyProvider({ children }) {
   // Livn pickup-option fees come back as bare-number prose like
   // "Transfer fee: 12.0" with no currency code or symbol — the supplier
   // implicitly bills it in the booking currency. We treat the bare number
-  // as bookingCurrency, FX-convert into the active targetCurrency, and
-  // prepend the target's symbol. Without that conversion an AUD fee would
-  // get mislabelled as "US$12" when the actual USD value is ~8.60, which
-  // disagrees with the Final Quote line item that does convert correctly.
+  // as bookingCurrency, FX-convert into the active targetCurrency, then
+  // apply the net-rate markup so the dropdown matches what QuoteView shows
+  // on the same line item once the user reaches the FINAL_QUOTE step.
   const formatFeeText = useCallback((text) => {
     if (text == null || text === '') return text;
     const s = String(text);
@@ -210,16 +221,19 @@ export function MoneyProvider({ children }) {
     if (/^\s*(%|percent|off\b|discount\b|years?\b|hours?\b|min(?:ute)?s?\b|days?\b|km\b|meters?\b|metres?\b|miles?\b|kg\b|cm\b|lb\b)/i.test(m[3])) return s;
     const num = Number(m[2].replace(',', '.'));
     if (!Number.isFinite(num)) return s;
-    // Convert the bare number from the booking currency into the active
-    // target currency. Falls back to no-conversion when bookingCurrency
-    // isn't set (e.g. catalog pages outside checkout) or rates are missing.
     let displayNum = num;
+    // 1) Convert from booking currency to active target currency.
     const src = (bookingCurrency || targetCurrency).toUpperCase();
     if (src !== targetCurrency && rates && rates[src] && rates[src][targetCurrency]) {
       displayNum = num * rates[src][targetCurrency];
     }
+    // 2) Apply the net-rate markup so this fee matches the marked-up
+    // line item the customer will see in the Final Quote (Livn flags
+    // these fees as resSuppliedPriceIsNetRate, so QuoteView marks them
+    // up; without this step the dropdown understates the fee by 20%).
+    if (bookingMarkup) displayNum *= (1 + bookingMarkup);
     return m[1] + (symbol ? symbol + formatNumber(displayNum) : targetCurrency + ' ' + formatNumber(displayNum)) + m[3];
-  }, [symbol, targetCurrency, bookingCurrency, rates]);
+  }, [symbol, targetCurrency, bookingCurrency, bookingMarkup, rates]);
 
   // Compact form for tight UI like the calendar date cells: "A$574" or
   // "€1.2k". Skips decimals; collapses thousands so the price fits in a tile.
@@ -264,15 +278,17 @@ export function MoneyProvider({ children }) {
     targetCurrency,
     preferredDisplayCurrency,
     bookingCurrency,
+    bookingMarkup,
     setTargetCurrency,
     setPreferredDisplayCurrency,
     setBookingCurrency,
+    setBookingMarkup,
     toUsd,
     formatUsd,
     formatUsdText,
     formatFeeText,
     formatPriceCompact,
-  }), [rates, error, targetCurrency, preferredDisplayCurrency, bookingCurrency, setTargetCurrency, setPreferredDisplayCurrency, setBookingCurrency, toUsd, formatUsd, formatUsdText, formatFeeText, formatPriceCompact]);
+  }), [rates, error, targetCurrency, preferredDisplayCurrency, bookingCurrency, bookingMarkup, setTargetCurrency, setPreferredDisplayCurrency, setBookingCurrency, setBookingMarkup, toUsd, formatUsd, formatUsdText, formatFeeText, formatPriceCompact]);
 
   return <MoneyContext.Provider value={value}>{children}</MoneyContext.Provider>;
 }
