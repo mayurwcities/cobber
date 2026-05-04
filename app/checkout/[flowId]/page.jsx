@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { apiGet, apiPut, apiPost, pickTotal, getProductMarkup, applyMarkup } from '@/lib/api';
+import { apiGet, apiPut, apiPost, cacheFlow, pickTotal, getProductMarkup, applyMarkup } from '@/lib/api';
 import { scrollToElement } from '@/lib/scroll';
 import { useMoney } from '@/components/MoneyProvider';
 import { Loading, ErrorBox } from '@/components/States';
@@ -348,9 +348,7 @@ export default function CheckoutPage() {
           details: failed.error,
         });
       }
-      if (typeof window !== 'undefined') {
-        sessionStorage.setItem('livn.flow.' + flowId, JSON.stringify(res.data));
-      }
+      cacheFlow(flowId, res.data);
       setFlow(res.data);
       return;
     }
@@ -406,9 +404,7 @@ export default function CheckoutPage() {
       }
 
       if (res.ok && res.data) {
-        if (typeof window !== 'undefined') {
-          sessionStorage.setItem('livn.flow.' + flowId, JSON.stringify(res.data));
-        }
+        cacheFlow(flowId, res.data);
         setFlow(res.data);
       }
       return;
@@ -484,9 +480,7 @@ export default function CheckoutPage() {
     setSubmitting(false);
     setPayStatus(null);
 
-    if (typeof window !== 'undefined') {
-      sessionStorage.setItem('livn.flow.' + flowId, JSON.stringify(res.data));
-    }
+    cacheFlow(flowId, res.data);
     setFlow(res.data);
   }
 

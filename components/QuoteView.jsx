@@ -60,9 +60,6 @@ export default function QuoteView({ quote, markup = 0 }) {
                   {li.type ? <span className="badge bg-slate-100 text-slate-700">{li.type}</span> : null}
                   {qty > 1 ? <span>× {qty}</span> : null}
                   {unit && qty > 1 ? <span>@ {formatUsd(unit)}</span> : null}
-                  {li?.salesComputationDetails?.resSuppliedPriceIsNetRate ? (
-                    <span className="badge bg-amber-100 text-amber-800">net rate</span>
-                  ) : null}
                   {isSurcharge ? <span className="text-amber-700">surcharge</span> : null}
                 </div>
               </div>

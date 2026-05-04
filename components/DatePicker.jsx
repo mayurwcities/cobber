@@ -55,36 +55,42 @@ export default function DatePicker({
   const max = maxDate ? parseISO(maxDate) : null;
 
   // ---- viewport month ----
+  // Two-month layout: top is viewMonth, bottom is viewMonth + 1. Floor the
+  // prev navigation at today's month — users can never page back into months
+  // that have already passed (Livn cert May 2026).
+  const minViewMonth = useMemo(() => firstOfMonth(today), [today]);
+
   const initial = useMemo(() => {
     if (value) {
       const d = parseISO(value);
       if (d) return firstOfMonth(d);
     }
-    // if no value, jump to the earliest available date, else today
-    const firstAvailable = [...priceByDate.keys()].sort()[0];
-    if (firstAvailable) {
-      const d = parseISO(firstAvailable);
-      if (d) return firstOfMonth(d);
-    }
-    return firstOfMonth(today);
-  }, [value, priceByDate, today]);
+    // Default to the month containing the earliest available date so the
+    // user lands on availability immediately, but never open before today's
+    // month.
+    const sorted = [...priceByDate.keys()].sort();
+    const earliest = sorted[0] ? parseISO(sorted[0]) : null;
+    const earliestMonth = earliest ? firstOfMonth(earliest) : minViewMonth;
+    return earliestMonth < minViewMonth ? minViewMonth : earliestMonth;
+  }, [value, priceByDate, minViewMonth]);
   const [viewMonth, setViewMonth] = useState(initial);
 
-  // Navigation — we clamp between earliest available and (12 months from today)
-  const availableMonths = useMemo(() => {
-    const set = new Set();
-    for (const iso of priceByDate.keys()) {
-      const d = parseISO(iso);
-      if (d) set.add(`${d.getFullYear()}-${d.getMonth()}`);
-    }
-    return set;
-  }, [priceByDate]);
+  const viewMonth2 = useMemo(() => addMonths(viewMonth, 1), [viewMonth]);
+  const weeks1 = useMemo(() => buildMonthGrid(viewMonth), [viewMonth]);
+  const weeks2 = useMemo(() => buildMonthGrid(viewMonth2), [viewMonth2]);
+  const label1 = viewMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const label2 = viewMonth2.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 
-  const prev = () => setViewMonth(addMonths(viewMonth, -1));
-  const next = () => setViewMonth(addMonths(viewMonth, +1));
-
-  const weeks = useMemo(() => buildMonthGrid(viewMonth), [viewMonth]);
-  const monthLabel = viewMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  // Page in 2-month strides so each click reveals a fresh pair. Prev clamps
+  // at today's month so we never expose past calendar pages.
+  const canGoPrev = viewMonth > minViewMonth;
+  const prev = () => {
+    setViewMonth((m) => {
+      const candidate = addMonths(m, -2);
+      return candidate < minViewMonth ? minViewMonth : candidate;
+    });
+  };
+  const next = () => setViewMonth((m) => addMonths(m, +2));
 
   if (loading) {
     return <div className="card p-3"><CalendarSkeleton /></div>;
@@ -99,82 +105,42 @@ export default function DatePicker({
     );
   }
 
+  const gridProps = {
+    priceByDate, value, min, max, today, onChange, formatPriceCompact,
+  };
+
   return (
     <div className="card p-3 select-none">
-      {/* Header */}
+      {/* Top month — both nav arrows live here, framing the title */}
       <div className="flex items-center justify-between mb-2 px-1">
         <button
           type="button"
           onClick={prev}
-          className="p-1.5 rounded hover:bg-slate-100 disabled:opacity-30"
-          aria-label="Previous month"
+          disabled={!canGoPrev}
+          className="p-1.5 rounded hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed"
+          aria-label="Previous 2 months"
         >
           <Chevron dir="left" />
         </button>
-        <div className="text-sm font-semibold tracking-wide">{monthLabel}</div>
+        <div className="text-sm font-semibold tracking-wide">{label1}</div>
         <button
           type="button"
           onClick={next}
-          className="p-1.5 rounded hover:bg-slate-100 disabled:opacity-30"
-          aria-label="Next month"
+          className="p-1.5 rounded hover:bg-slate-100"
+          aria-label="Next 2 months"
         >
           <Chevron dir="right" />
         </button>
       </div>
+      <WeekdayRow />
+      <DayGrid weeks={weeks1} viewMonth={viewMonth} {...gridProps} />
 
-      {/* Weekday row */}
-      <div className="grid grid-cols-7 text-[10px] font-medium text-slate-400 px-1 mb-1">
-        {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((w) => (
-          <div key={w} className="text-center py-1">{w}</div>
-        ))}
+      {/* Bottom month — title only, navigation stays on the top header */}
+      <div className="text-sm font-semibold tracking-wide text-center mt-4 mb-2 px-1">
+        {label2}
       </div>
-
-      {/* Day grid */}
-      <div className="grid grid-cols-7 gap-1">
-        {weeks.map((cell, i) => {
-          if (!cell) {
-            return <div key={'e' + i} />;
-          }
-          const iso = toIsoDate(cell);
-          const inMonth = cell.getMonth() === viewMonth.getMonth();
-          const isPast = cell < min;
-          const afterMax = max && cell > max;
-          const isAvailable = priceByDate.has(iso);
-          const fp = priceByDate.get(iso);
-          const isSelected = iso === value;
-          const isToday = sameDay(cell, today);
-          const disabled = !inMonth || isPast || afterMax || !isAvailable;
-
-          const base = 'aspect-square rounded-md flex flex-col items-center justify-center text-xs transition ';
-          const cls = disabled
-            ? base + 'text-slate-300 cursor-not-allowed bg-slate-50/50 line-through decoration-1'
-            : isSelected
-              ? base + 'bg-brand-700 text-white font-semibold shadow-brand-glow'
-              : base + 'bg-white text-ink-900 hover:bg-brand-50 hover:ring-1 hover:ring-brand-200 cursor-pointer';
-
-          return (
-            <button
-              key={iso}
-              type="button"
-              disabled={disabled}
-              onClick={() => onChange && onChange(iso)}
-              className={cls}
-              aria-pressed={isSelected}
-              aria-label={iso + (isAvailable ? '' : ' (unavailable)')}
-              title={disabled && inMonth && !isPast ? 'Not operating on this date' : ''}
-            >
-              <span className={isToday && !isSelected ? 'underline decoration-brand-400 decoration-2 underline-offset-2' : ''}>
-                {cell.getDate()}
-              </span>
-              {fp && !disabled ? (
-                <span className={'text-[9px] mt-0.5 tabular-nums ' + (isSelected ? 'text-white/80' : 'text-brand-700')}>
-                  {formatPriceCompact(fp)}
-                </span>
-              ) : null}
-            </button>
-          );
-        })}
-      </div>
+      <WeekdayRow />
+      <DayGrid weeks={weeks2} viewMonth={viewMonth2} {...gridProps} />
 
       {/* Legend */}
       <div className="flex items-center gap-3 mt-3 px-1 text-[10px] text-ink-500">
@@ -185,6 +151,68 @@ export default function DatePicker({
           <span className="ml-auto">{priceByDate.size} operating date{priceByDate.size === 1 ? '' : 's'}</span>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function WeekdayRow() {
+  return (
+    <div className="grid grid-cols-7 text-[10px] font-medium text-slate-400 px-1 mb-1">
+      {['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((w) => (
+        <div key={w} className="text-center py-1">{w}</div>
+      ))}
+    </div>
+  );
+}
+
+// Renders a single month's day grid. Cells from the leading/trailing weeks
+// that belong to adjacent months render as blank slots — each calendar is
+// visually self-contained, no greyed-out bleed-in days.
+function DayGrid({ weeks, viewMonth, priceByDate, value, min, max, today, onChange, formatPriceCompact }) {
+  return (
+    <div className="grid grid-cols-7 gap-1">
+      {weeks.map((cell, i) => {
+        if (!cell || cell.getMonth() !== viewMonth.getMonth()) {
+          return <div key={'e' + i} />;
+        }
+        const iso = toIsoDate(cell);
+        const isPast = cell < min;
+        const afterMax = max && cell > max;
+        const isAvailable = priceByDate.has(iso);
+        const fp = priceByDate.get(iso);
+        const isSelected = iso === value;
+        const isToday = sameDay(cell, today);
+        const disabled = isPast || afterMax || !isAvailable;
+
+        const base = 'aspect-square rounded-md flex flex-col items-center justify-center text-xs transition ';
+        const cls = disabled
+          ? base + 'text-slate-300 cursor-not-allowed bg-slate-50/50 line-through decoration-1'
+          : isSelected
+            ? base + 'bg-brand-700 text-white font-semibold shadow-brand-glow'
+            : base + 'bg-white text-ink-900 hover:bg-brand-50 hover:ring-1 hover:ring-brand-200 cursor-pointer';
+
+        return (
+          <button
+            key={iso}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange && onChange(iso)}
+            className={cls}
+            aria-pressed={isSelected}
+            aria-label={iso + (isAvailable ? '' : ' (unavailable)')}
+            title={disabled && !isPast ? 'Not operating on this date' : ''}
+          >
+            <span className={isToday && !isSelected ? 'underline decoration-brand-400 decoration-2 underline-offset-2' : ''}>
+              {cell.getDate()}
+            </span>
+            {fp && !disabled ? (
+              <span className={'text-[9px] mt-0.5 tabular-nums ' + (isSelected ? 'text-white/80' : 'text-brand-700')}>
+                {formatPriceCompact(fp)}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
     </div>
   );
 }

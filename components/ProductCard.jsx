@@ -42,11 +42,6 @@ export default function ProductCard({ product }) {
             Disabled
           </span>
         ) : null}
-        {product.usesNetRates ? (
-          <span className="absolute top-2.5 right-2.5 badge bg-amber-400/95 text-amber-950 shadow">
-            Net rate
-          </span>
-        ) : null}
       </div>
 
       <div className="p-4 flex-1 flex flex-col">

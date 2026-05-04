@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Loading, ErrorBox } from '@/components/States';
 import DatePicker from '@/components/DatePicker';
-import { apiGet, apiPost, formatDuration, formatAgeRange, formatLocation, getProductMarkup, applyMarkup, pickFromPrice } from '@/lib/api';
+import { apiGet, apiPost, cacheFlow, formatDuration, formatAgeRange, formatLocation, getProductMarkup, applyMarkup, pickFromPrice } from '@/lib/api';
 import { scrollToElement } from '@/lib/scroll';
 import { useMoney } from '@/components/MoneyProvider';
 
@@ -116,9 +116,7 @@ export default function ProductDetailPage() {
     const flowId = res.data?.id;
     if (!flowId) { setStartError({ message: 'Flow created but no id returned.' }); return; }
     // Stash the initial flow in sessionStorage so we can hydrate on the next page
-    if (typeof window !== 'undefined') {
-      sessionStorage.setItem('livn.flow.' + flowId, JSON.stringify(res.data));
-    }
+    cacheFlow(flowId, res.data);
     router.push(`/checkout/${flowId}`);
   }
 
@@ -126,7 +124,6 @@ export default function ProductDetailPage() {
   if (error) return <ErrorBox error={error} />;
   if (!product) return null;
 
-  const netRate = product?._pricing?.usesNetRates ?? product?.usesNetRates;
   const productMarkup = getProductMarkup(product);
   const rawFromPrices = product?._pricing?.fromPrices || product?.fromPrices || [];
   // Pick Livn's native price for the active display currency so the sticky
@@ -201,7 +198,6 @@ export default function ProductDetailPage() {
               <span className="text-lg font-bold text-brand-800 tabular-nums">
                 {formatUsd(fromPrices[0])}
               </span>
-              <span className="badge bg-amber-100 text-amber-800">Net rate</span>
             </div>
             <p className="mt-2 text-xs text-amber-700">
               ⓘ This is a net rate — add your own commission markup before showing it to customers.
@@ -325,18 +321,22 @@ export default function ProductDetailPage() {
       </div>
 
       <aside className="space-y-4">
-        <div className="card p-5 sticky top-20">
-          <div className="text-[10px] uppercase tracking-wider muted">From</div>
-          <div className="flex items-baseline gap-2 mt-0.5">
-            <span className="text-3xl font-bold text-brand-800 tabular-nums">
-              {fromPrices[0] ? formatUsd(fromPrices[0]) : '—'}
-            </span>
-            {netRate ? (
-              <span className="badge bg-amber-100 text-amber-800">Net rate</span>
-            ) : null}
+        {/* Sticky sidebar capped at the viewport so the Start-booking button
+            is always reachable. The 2-month calendar can outgrow the viewport
+            on shorter screens, so we let the middle (date) section scroll
+            internally while the price stays pinned at the top and the CTA
+            stays pinned at the bottom of the card. */}
+        <div className="card sticky top-20 max-h-[calc(100vh-6rem)] flex flex-col p-5">
+          <div className="shrink-0">
+            <div className="text-[10px] uppercase tracking-wider muted">From</div>
+            <div className="flex items-baseline gap-2 mt-0.5">
+              <span className="text-3xl font-bold text-brand-800 tabular-nums">
+                {fromPrices[0] ? formatUsd(fromPrices[0]) : '—'}
+              </span>
+            </div>
           </div>
 
-          <div className="mt-4">
+          <div className="mt-4 flex-1 min-h-0 overflow-y-auto -mx-5 px-5">
             <label className="label">Select a date</label>
             <DatePicker
               value={selectedDate}
@@ -352,40 +352,42 @@ export default function ProductDetailPage() {
             ) : null}
           </div>
 
-          {currencies.length > 1 ? (
-            <div className="mt-4">
-              <label className="label" htmlFor="booking-currency">Booking currency</label>
-              <select
-                id="booking-currency"
-                className="input"
-                value={currency}
-                onChange={(e) => handleCurrencyChange(e.target.value)}
-              >
-                {currencies.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
-              <p className="text-xs text-slate-500 mt-1">
-                Prices on this page and your booking will both use {currency}.
-              </p>
+          <div className="shrink-0">
+            {currencies.length > 1 ? (
+              <div className="mt-4">
+                <label className="label" htmlFor="booking-currency">Booking currency</label>
+                <select
+                  id="booking-currency"
+                  className="input"
+                  value={currency}
+                  onChange={(e) => handleCurrencyChange(e.target.value)}
+                >
+                  {currencies.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  Prices on this page and your booking will both use {currency}.
+                </p>
+              </div>
+            ) : null}
+
+            <button
+              onClick={startCheckout}
+              disabled={starting || !selectedDate}
+              className="btn-primary w-full mt-4"
+            >
+              {starting ? 'Starting…' : 'Start booking'}
+            </button>
+
+            <div ref={startErrorRef} className="scroll-mt-24">
+              {startError ? <div className="mt-3"><ErrorBox error={startError} /></div> : null}
             </div>
-          ) : null}
 
-          <button
-            onClick={startCheckout}
-            disabled={starting || !selectedDate}
-            className="btn-primary w-full mt-4"
-          >
-            {starting ? 'Starting…' : 'Start booking'}
-          </button>
-
-          <div ref={startErrorRef} className="scroll-mt-24">
-            {startError ? <div className="mt-3"><ErrorBox error={startError} /></div> : null}
+            <p className="text-xs text-slate-500 mt-3">
+              Product ID: {product.id} · resSystem: {product.resSystem || product.supplier?.resSystem}
+            </p>
           </div>
-
-          <p className="text-xs text-slate-500 mt-3">
-            Product ID: {product.id} · resSystem: {product.resSystem || product.supplier?.resSystem}
-          </p>
         </div>
       </aside>
     </div>

@@ -805,8 +805,9 @@ function OptionCard({ selected, onClick, type, children }) {
   );
 }
 
-// Drag-and-drop file picker with preview for images. Stores the file as
-// base64 in the answer (Livn expects raw base64 without the data: prefix).
+// Drag-and-drop file picker with preview for images. Stores the file as a
+// full RFC 2397 data URL ("data:<mime>;base64,…") so the encoding type
+// travels with the payload (Livn cert May 2026).
 function FileDropZone({ questionId, value, onChange, accept }) {
   const [name, setName] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
@@ -818,8 +819,7 @@ function FileDropZone({ questionId, value, onChange, accept }) {
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = String(reader.result || '');
-      // Livn wants the bare base64 payload, not the data: URI prefix.
-      onChange(dataUrl.split(',')[1] || dataUrl);
+      onChange(dataUrl);
       if (file.type?.startsWith('image/')) setPreviewUrl(dataUrl);
       else setPreviewUrl('');
     };
