@@ -199,9 +199,6 @@ export default function ProductDetailPage() {
                 {formatUsd(fromPrices[0])}
               </span>
             </div>
-            <p className="mt-2 text-xs text-amber-700">
-              ⓘ This is a net rate — add your own commission markup before showing it to customers.
-            </p>
           </section>
         ) : null}
 
