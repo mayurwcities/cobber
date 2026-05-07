@@ -28,8 +28,7 @@ export function Empty({ label = 'Nothing to show.' }) {
 
 /**
  * User-friendly error banner. Maps raw `{code, message, details}` shapes to
- * plain-English titles + short explanations. Technical details are hidden
- * behind a disclosure toggle so they don't scare non-technical users.
+ * plain-English titles + short explanations.
  *
  * Props:
  *   error     — the error object from apiGet/apiPost (or any {code, message, details})
@@ -39,7 +38,7 @@ export function Empty({ label = 'Nothing to show.' }) {
 export function ErrorBox({ error, onRetry, variant = 'inline' }) {
   if (!error) return null;
 
-  const { title, message, hint, showDetails } = prettify(error);
+  const { title, message, hint } = prettify(error);
   const wrap = variant === 'card'
     ? 'rounded-lg border border-red-200 bg-red-50 p-4 shadow-sm'
     : 'rounded-md border border-red-200 bg-red-50 p-3';
@@ -53,8 +52,8 @@ export function ErrorBox({ error, onRetry, variant = 'inline' }) {
           {message ? <div className="text-sm text-red-800 mt-0.5 whitespace-pre-wrap">{message}</div> : null}
           {hint ? <div className="text-xs text-red-700 mt-1">{hint}</div> : null}
 
-          <div className="flex items-center gap-3 mt-2">
-            {onRetry ? (
+          {onRetry ? (
+            <div className="mt-2">
               <button
                 type="button"
                 onClick={onRetry}
@@ -62,16 +61,8 @@ export function ErrorBox({ error, onRetry, variant = 'inline' }) {
               >
                 ↻ Try again
               </button>
-            ) : null}
-            {showDetails ? (
-              <details className="text-xs text-red-700">
-                <summary className="cursor-pointer select-none">Technical details</summary>
-                <pre className="mt-1 p-2 bg-white/80 rounded text-[11px] overflow-x-auto whitespace-pre-wrap break-words">
-{JSON.stringify(showDetails, null, 2)}
-                </pre>
-              </details>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -90,18 +81,15 @@ function WarnIcon() {
 // ----- prettify ------------------------------------------------------
 
 /**
- * Look at a raw error and return a user-friendly title/message/hint and
- * the technical details blob to disclose on demand.
+ * Look at a raw error and return a user-friendly title/message/hint.
  */
 function prettify(err) {
   const code    = err?.code || err?.error?.code || '';
-  const status  = err?.status;
   const rawMsg  = err?.message || err?.error?.message || '';
   const details = err?.details || err?.error?.details || null;
 
   // Livn's "customerErrorMessage" is already phrased for end-users. Prefer it.
   const livnCustomer = details?.error?.customerErrorMessage;
-  const livnInternal = details?.error?.internalErrorMessage;
   const terminated   = details?.error?.terminateTransaction === true;
 
   if (livnCustomer) {
@@ -111,7 +99,6 @@ function prettify(err) {
       hint:    terminated
         ? 'The reservation system has rejected this flow. Try a different product or date.'
         : 'Fix the fields above and try again.',
-      showDetails: { code, status, internal: livnInternal, ...details },
     };
   }
 
@@ -251,7 +238,6 @@ function prettify(err) {
       title:   preset.title,
       message: preset.message,
       hint:    preset.hint || null,
-      showDetails: { code, status, message: rawMsg, ...(details ? { details } : {}) },
     };
   }
 
@@ -260,6 +246,5 @@ function prettify(err) {
     title:   'Something went wrong',
     message: rawMsg || String(err),
     hint:    null,
-    showDetails: { code: code || 'unknown', status, ...(details ? { details } : {}) },
   };
 }

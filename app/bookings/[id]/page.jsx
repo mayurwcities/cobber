@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import { apiGet, apiDelete, formatDate, formatDateTime } from '@/lib/api';
 import { Loading, ErrorBox } from '@/components/States';
 import QuoteView from '@/components/QuoteView';
+import VoucherButton from '@/components/VoucherButton';
 import { useMoney } from '@/components/MoneyProvider';
 
 /**
@@ -96,9 +97,9 @@ export default function BookingDetailPage() {
             <div className="text-xs text-slate-500">Confirmed {formatDateTime(booking.confirmed)}</div>
           </div>
           <div className="flex gap-2 shrink-0">
-            <a className="btn-secondary" target="_blank" rel="noreferrer" href={`/api/livn/bookings/${booking.id}/pdf`}>
+            <VoucherButton type="booking" id={booking.id} className="btn-secondary">
               PDF voucher
-            </a>
+            </VoucherButton>
             {cancelled ? (
               <span className="badge bg-red-100 text-red-700 self-center">Cancelled</span>
             ) : (
@@ -264,14 +265,9 @@ function TicketRow({ ticket }) {
           <div className="text-xs text-amber-700 mt-1">Local fees: {formatUsdText(ticket.localFees)}</div>
         ) : null}
       </div>
-      <a
-        className="btn-secondary shrink-0"
-        target="_blank"
-        rel="noreferrer"
-        href={`/api/livn/tickets/${ticket.id}/pdf`}
-      >
+      <VoucherButton type="ticket" id={ticket.id} className="btn-secondary shrink-0">
         PDF
-      </a>
+      </VoucherButton>
     </div>
   );
 }

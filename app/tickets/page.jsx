@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { apiGet, formatDate, pickList } from '@/lib/api';
 import { Loading, ErrorBox, Empty } from '@/components/States';
+import VoucherButton from '@/components/VoucherButton';
 
 export default function TicketsPage() {
   const [q, setQ] = useState({ anyReference: '', passengerName: '' });
@@ -69,9 +70,9 @@ export default function TicketsPage() {
                 </div>
                 {t.uuid ? <div className="text-[10px] text-slate-400 font-mono truncate">{t.uuid}</div> : null}
               </div>
-              <a className="btn-secondary shrink-0" target="_blank" rel="noreferrer" href={`/api/livn/tickets/${t.id}/pdf`}>
+              <VoucherButton type="ticket" id={t.id} className="btn-secondary shrink-0">
                 PDF
-              </a>
+              </VoucherButton>
             </div>
           );
         })}

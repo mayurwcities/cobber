@@ -11,6 +11,7 @@ import FareSelector from '@/components/FareSelector';
 import QuestionRenderer, { questionNumericBounds, walkActiveQuestions, isDobQuestion, todayIso } from '@/components/QuestionRenderer';
 import QuoteView from '@/components/QuoteView';
 import BraintreeDropIn from '@/components/BraintreeDropIn';
+import VoucherButton from '@/components/VoucherButton';
 
 export default function CheckoutPage() {
   const { flowId } = useParams();
@@ -902,6 +903,21 @@ function validateOneQuestion(q, answers) {
       questionUuid: q.uuid,
     };
   }
+  // EMAIL questions don't always carry a regex from Livn, but a typo in the
+  // contact email means the customer never receives the voucher. Lightweight
+  // RFC-5322-ish check: local-part, '@', domain with a dot. Catches "foo@",
+  // "foo @bar", "foo@bar" without false-positives on legitimate addresses.
+  const t = String(q.answerType || '').toUpperCase();
+  if (t === 'EMAIL') {
+    const stringVal = String(v).trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(stringVal)) {
+      const label = q.title || q.question || 'this email field';
+      return {
+        message: `"${label}" doesn't look like a valid email address.`,
+        questionUuid: q.uuid,
+      };
+    }
+  }
   // Regex validation runs whether the field is required or not — once the
   // user has filled it in it must match. Used by Salzburg's Frequent Flyer
   // follow-up (\d{10}) and any cert Product 4 regex prompt.
@@ -924,7 +940,6 @@ function validateOneQuestion(q, answers) {
   // constraints under several different field names depending on the supplier,
   // and sometimes only as prose in the description. questionNumericBounds()
   // tries every shape so we and the renderer never disagree.
-  const t = String(q.answerType || '').toUpperCase();
   if (t === 'NUMBER' || t === 'INTEGER' || t === 'DECIMAL' || t === 'FLOAT') {
     const num = Number(v);
     if (Number.isFinite(num)) {
@@ -1258,9 +1273,9 @@ function BookingCard({ booking: b, formatUsdText }) {
         ) : null}
 
         <div className="flex gap-2 flex-wrap pt-2 border-t border-slate-100">
-          <a className="btn-primary" target="_blank" rel="noreferrer" href={`/api/livn/bookings/${b.id}/pdf`}>
+          <VoucherButton type="booking" id={b.id} className="btn-primary">
             Download voucher PDF
-          </a>
+          </VoucherButton>
           <Link className="btn-secondary" href={`/bookings/${b.id}`}>View full details →</Link>
         </div>
       </div>
@@ -1315,14 +1330,9 @@ function ConfirmedTicketRow({ ticket: t, formatUsdText }) {
             </div>
           ) : null}
         </div>
-        <a
-          href={`/api/livn/tickets/${t.id}/pdf`}
-          target="_blank"
-          rel="noreferrer"
-          className="btn-secondary shrink-0"
-        >
+        <VoucherButton type="ticket" id={t.id} className="btn-secondary shrink-0">
           Ticket PDF
-        </a>
+        </VoucherButton>
       </div>
 
       {(pickup?.notes || pickup?.dropoffNotes || pickup?.location) ? (
