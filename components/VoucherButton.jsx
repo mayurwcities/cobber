@@ -21,8 +21,15 @@ export default function VoucherButton({
   async function open() {
     if (busy || disabled) return;
     setBusy(true);
+    // Pre-open a blank tab synchronously so popup blockers don't trip when we
+    // navigate it after the fetch. We deliberately do NOT pass
+    // 'noopener,noreferrer' here — those flags make window.open return null
+    // in most browsers, which would lose our reference to the new tab and
+    // make the voucher load in the current tab instead. The redirect target
+    // is same-origin (/api/voucher/...), so opener access isn't a concern;
+    // we still null out win.opener after navigation as a belt-and-braces.
     const win = typeof window !== 'undefined'
-      ? window.open('about:blank', '_blank', 'noopener,noreferrer')
+      ? window.open('about:blank', '_blank')
       : null;
     let failure = null;
     try {
@@ -34,8 +41,13 @@ export default function VoucherButton({
       const json = await res.json().catch(() => null);
       if (json?.success && json.data?.token) {
         const url = '/api/voucher/' + json.data.token;
-        if (win) win.location.href = url;
-        else if (typeof window !== 'undefined') window.location.href = url;
+        if (win) {
+          try { win.opener = null; } catch (_) {}
+          win.location.href = url;
+        } else if (typeof window !== 'undefined') {
+          // Pop-up blocked — fall back to navigating the current tab.
+          window.location.href = url;
+        }
       } else {
         failure = json?.error?.message || 'Could not generate voucher link.';
       }
